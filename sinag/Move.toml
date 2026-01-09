@@ -1,12 +1,11 @@
 [package]
 name = "sinag"
-version = "1.0.0"
 edition = "2024.beta"
+#published-at = "0x6d9a0ac9f9741f5e578a4e874010760ab2da7d558b7c4115174c631ee694b48e"
+#published-at = "0xaf44d023fe7f70e54fa1ca8edf9cc42c13335d6719c4a34eaf013b7a373819d6"
 
 [dependencies]
-Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/testnet" }
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "testnet-v1.39.2" }
 
 [addresses]
 sinag = "0x0"
-
-[dev-dependencies]

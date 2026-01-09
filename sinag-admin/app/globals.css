@@ -1,0 +1,95 @@
+/* app/globals.css */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+  }
+
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+  }
+
+  * {
+    @apply border-gray-200;
+  }
+  
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: #334155;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* Animation utilities */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.3s ease-out;
+}
+
+/* Selection */
+::selection {
+  background-color: #D4AF37;
+  color: white;
+}
+
+.dark ::selection {
+  background-color: #D4AF37;
+  color: black;
+}
+
+/* Focus visible */
+*:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+}
+
+.dark *:focus-visible {
+  outline-color: #D4AF37;
+}
