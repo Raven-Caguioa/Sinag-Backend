@@ -297,6 +297,17 @@ module sinag::campaign {
         });
     }
 
+    entry fun add_admin(
+        _admin: &AdminCap,
+        recipient: address,
+        ctx: &mut TxContext
+    ) {
+        let new_admin_cap = AdminCap {
+            id: object::new(ctx)
+        };
+        transfer::public_transfer(new_admin_cap, recipient);
+    }
+
     entry fun create_campaign_sui(
         _admin: &AdminCap,
         registry: &mut CampaignRegistry,

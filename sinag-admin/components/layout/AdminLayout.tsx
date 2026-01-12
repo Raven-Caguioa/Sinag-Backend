@@ -22,7 +22,7 @@ import {
   Shield,
   Settings
 } from "lucide-react";
-import { isAdmin } from "@/lib/admins";
+import { useAdmin } from "@/lib/hooks/useAdmin";
 
 interface AdminLayoutProps {
   children: ReactNode;
@@ -42,8 +42,8 @@ export const AdminLayout: FC<AdminLayoutProps> = ({ children }) => {
   // Check if wallet is connected
   const isConnected = !!account;
   
-  // Check if connected address is an admin
-  const isAuthorized = isAdmin(account?.address);
+  // Check if connected address is an admin via AdminCap ownership
+  const { isAdmin: isAuthorized, loading: adminLoading } = useAdmin();
 
   const navItems = [
     { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -56,6 +56,29 @@ export const AdminLayout: FC<AdminLayoutProps> = ({ children }) => {
     { href: "/yield-statistics", label: "Yield Statistics", icon: BarChart3 },
     { href: "/settings", label: "Platform Settings", icon: Settings }, 
   ];
+
+  // Show loading screen while checking admin status
+  if (isConnected && adminLoading) {
+    return (
+      <div className={darkMode ? "dark" : ""}>
+        <div className="min-h-screen bg-white dark:bg-[#050505] text-slate-900 dark:text-slate-300 transition-colors duration-300 flex items-center justify-center">
+          <div className="text-center space-y-6 p-8">
+            <div className="w-20 h-20 mx-auto rounded-full bg-slate-900 dark:bg-[#D4AF37] flex items-center justify-center animate-pulse">
+              <Shield className="w-10 h-10 text-white dark:text-black" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-semibold text-slate-900 dark:text-white mb-2">
+                Verifying Access...
+              </h1>
+              <p className="text-slate-500 dark:text-slate-400">
+                Checking admin permissions
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // Show connect wallet screen if not connected
   if (!isConnected) {

@@ -1,29 +1,69 @@
 // lib/admins.ts
-// Configuration file for allowed admin wallet addresses
+// Admin authentication via on-chain AdminCap ownership
+
+import { SuiClient } from "@mysten/sui.js/client";
+import { ADMIN_CAP_TYPE } from "./constants";
 
 /**
- * Array of Sui wallet addresses that are authorized to access the admin dashboard.
- * Only addresses in this list will be able to access admin features.
- * 
- * Add admin addresses here in the format: "0x..." (lowercase recommended)
+ * Check if a given address owns an AdminCap object on-chain
+ * This is the new way to verify admin status - anyone who owns an AdminCap
+ * is considered an admin.
  */
-export const ALLOWED_ADMINS: string[] = [
-    "0xccceeddc79e52cdd512b569c50223837355a738425169153916e3ee93796645e",
-    "0x7a3460760da4de7d58d480d676a1cff58376169df66acb6e6b6da6f0baa699ea",	
-  // Example: "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-];
+export async function isAdminOnChain(
+  client: SuiClient,
+  address: string | null | undefined
+): Promise<boolean> {
+  if (!address) return false;
+
+  try {
+    const ownedObjects = await client.getOwnedObjects({
+      owner: address,
+      filter: { StructType: ADMIN_CAP_TYPE },
+      options: { showContent: false },
+    });
+
+    return ownedObjects.data.length > 0;
+  } catch (error) {
+    console.error("Error checking admin status:", error);
+    return false;
+  }
+}
 
 /**
- * Check if a given address is an authorized admin
+ * Legacy synchronous check - kept for backward compatibility
+ * This now always returns false as we've moved to on-chain verification.
+ * Use isAdminOnChain() instead.
+ * 
+ * @deprecated Use isAdminOnChain() instead
  */
 export function isAdmin(address: string | null | undefined): boolean {
-  if (!address) return false;
-  
-  // Normalize address to lowercase for comparison
-  const normalizedAddress = address.toLowerCase();
-  
-  return ALLOWED_ADMINS.some(
-    (admin) => admin.toLowerCase() === normalizedAddress
-  );
+  // Legacy function - always returns false now
+  // Components should use the async isAdminOnChain() or a React hook
+  return false;
+}
+
+/**
+ * Get all AdminCap objects owned by an address
+ */
+export async function getAdminCaps(
+  client: SuiClient,
+  address: string | null | undefined
+): Promise<string[]> {
+  if (!address) return [];
+
+  try {
+    const ownedObjects = await client.getOwnedObjects({
+      owner: address,
+      filter: { StructType: ADMIN_CAP_TYPE },
+      options: { showContent: false },
+    });
+
+    return ownedObjects.data
+      .map((obj) => obj.data?.objectId)
+      .filter((id): id is string => !!id);
+  } catch (error) {
+    console.error("Error fetching admin caps:", error);
+    return [];
+  }
 }
 

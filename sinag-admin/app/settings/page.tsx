@@ -5,7 +5,7 @@
 import { useState, useEffect } from "react";
 import { useSignAndExecuteTransaction, useCurrentAccount, useSuiClient } from "@mysten/dapp-kit";
 import { Transaction } from "@mysten/sui/transactions";
-import { Settings, Loader2, CheckCircle, AlertCircle, Shield, Pause, Play, Wallet } from "lucide-react";
+import { Settings, Loader2, CheckCircle, AlertCircle, Shield, Pause, Play, Wallet, UserPlus, Users } from "lucide-react";
 import { 
   PACKAGE_ID,
   ADMIN_CAP, 
@@ -18,6 +18,8 @@ import {
   waitForTransaction 
 } from "@/lib/utils";
 import { CampaignRegistry } from "@/lib/types";
+import { getAdminCaps } from "@/lib/admins";
+import { ADMIN_CAP_TYPE } from "@/lib/constants";
 
 export default function PlatformSettings() {
   const account = useCurrentAccount();
@@ -31,9 +33,13 @@ export default function PlatformSettings() {
   const [success, setSuccess] = useState<string>("");
   const [txDigest, setTxDigest] = useState<string>("");
   const [newTreasuryAddress, setNewTreasuryAddress] = useState<string>("");
+  const [newAdminAddress, setNewAdminAddress] = useState<string>("");
+  const [adminCaps, setAdminCaps] = useState<string[]>([]);
+  const [loadingAdmins, setLoadingAdmins] = useState(false);
 
   useEffect(() => {
     fetchRegistry();
+    fetchAdminCaps();
   }, [account]);
 
   const fetchRegistry = async () => {
@@ -67,6 +73,23 @@ export default function PlatformSettings() {
       setError("Failed to load registry data");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchAdminCaps = async () => {
+    if (!account) {
+      return;
+    }
+
+    try {
+      setLoadingAdmins(true);
+      // Get all AdminCap objects owned by the current user
+      const caps = await getAdminCaps(client, account.address);
+      setAdminCaps(caps);
+    } catch (err: any) {
+      console.error("Error fetching admin caps:", err);
+    } finally {
+      setLoadingAdmins(false);
     }
   };
 
@@ -187,6 +210,79 @@ export default function PlatformSettings() {
       );
     } catch (err: any) {
       console.error("Error updating treasury:", err);
+      setError(err.message || ERROR_MESSAGES.TRANSACTION_FAILED);
+      setUpdating(false);
+    }
+  };
+
+  const handleAddAdmin = async () => {
+    if (!account) {
+      setError(ERROR_MESSAGES.NO_WALLET);
+      return;
+    }
+
+    if (!newAdminAddress.trim()) {
+      setError("Please enter a valid admin address");
+      return;
+    }
+
+    // Basic address validation (Sui addresses start with 0x and are 66 chars)
+    if (!newAdminAddress.startsWith("0x") || newAdminAddress.length !== 66) {
+      setError("Invalid Sui address format. Must start with 0x and be 66 characters long.");
+      return;
+    }
+
+    // Get the first AdminCap owned by the current user
+    if (adminCaps.length === 0) {
+      setError("You don't have an AdminCap. Cannot add new admins.");
+      return;
+    }
+
+    setUpdating(true);
+    setError("");
+    setSuccess("");
+    setTxDigest("");
+
+    try {
+      const tx = new Transaction();
+
+      tx.moveCall({
+        target: `${PACKAGE_ID}::campaign::add_admin`,
+        arguments: [
+          tx.object(adminCaps[0]), // Use the first AdminCap owned by the user
+          tx.pure(newAdminAddress.trim()),
+        ],
+      });
+
+      signAndExecute(
+        {
+          transaction: tx,
+        },
+        {
+          onSuccess: async (result) => {
+            setTxDigest(result.digest);
+            
+            try {
+              await waitForTransaction(client, result.digest);
+              setSuccess(`Admin added successfully! New admin: ${shortenAddress(newAdminAddress.trim(), 8)}`);
+              setNewAdminAddress("");
+              // Refresh admin caps list
+              await fetchAdminCaps();
+            } catch (confirmError) {
+              console.error("Confirmation error:", confirmError);
+            }
+            
+            setUpdating(false);
+          },
+          onError: (error) => {
+            console.error("Transaction error:", error);
+            setError(error.message || ERROR_MESSAGES.TRANSACTION_FAILED);
+            setUpdating(false);
+          },
+        }
+      );
+    } catch (err: any) {
+      console.error("Error adding admin:", err);
       setError(err.message || ERROR_MESSAGES.TRANSACTION_FAILED);
       setUpdating(false);
     }
@@ -349,6 +445,92 @@ export default function PlatformSettings() {
             <p className="text-xs text-blue-700 dark:text-blue-400">
               <strong>Warning:</strong> Changing the treasury address will affect all future withdrawals. 
               Ensure the new address is correct and secure.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Admin Management Section */}
+      <div className="p-6 rounded-2xl bg-slate-50 dark:bg-[#0a0a0a] border border-slate-200 dark:border-white/5">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="p-2 rounded-lg bg-purple-500 dark:bg-purple-600">
+            <Users className="w-5 h-5 text-white" />
+          </div>
+          <h2 className="text-lg font-semibold text-slate-900 dark:text-white">
+            Admin Management
+          </h2>
+        </div>
+
+        <div className="space-y-4">
+          <div className="p-4 rounded-xl bg-white dark:bg-[#111] border border-slate-200 dark:border-white/10">
+            <p className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
+              Your AdminCap Objects
+            </p>
+            {loadingAdmins ? (
+              <div className="flex items-center gap-2">
+                <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
+                <p className="text-xs text-slate-500 dark:text-slate-400">Loading...</p>
+              </div>
+            ) : adminCaps.length > 0 ? (
+              <div className="space-y-2">
+                {adminCaps.map((capId, index) => (
+                  <div key={capId} className="flex items-center gap-2">
+                    <Shield className="w-4 h-4 text-purple-500" />
+                    <p className="font-mono text-xs text-slate-900 dark:text-white break-all">
+                      {shortenAddress(capId, 12)}
+                    </p>
+                  </div>
+                ))}
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
+                  You own {adminCaps.length} AdminCap{adminCaps.length !== 1 ? "s" : ""}. 
+                  This grants you admin privileges.
+                </p>
+              </div>
+            ) : (
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                No AdminCap objects found. You need an AdminCap to perform admin actions.
+              </p>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
+              New Admin Address
+            </label>
+            <input
+              type="text"
+              value={newAdminAddress}
+              onChange={(e) => setNewAdminAddress(e.target.value)}
+              placeholder="0x..."
+              className="w-full px-4 py-3 rounded-lg bg-white dark:bg-[#111] border border-slate-200 dark:border-white/10 text-slate-900 dark:text-white focus:ring-2 focus:ring-purple-500 dark:focus:ring-purple-400 focus:border-transparent transition-all font-mono text-sm"
+            />
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+              Enter a valid Sui address (0x followed by 64 hex characters). This will mint a new AdminCap and transfer it to the recipient.
+            </p>
+          </div>
+
+          <button
+            onClick={handleAddAdmin}
+            disabled={updating || !account || !newAdminAddress.trim() || adminCaps.length === 0}
+            className="w-full py-3 rounded-xl bg-purple-600 dark:bg-purple-500 text-white font-semibold hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
+          >
+            {updating ? (
+              <>
+                <Loader2 className="w-5 h-5 animate-spin" />
+                Adding Admin...
+              </>
+            ) : (
+              <>
+                <UserPlus className="w-5 h-5" />
+                Add Admin
+              </>
+            )}
+          </button>
+
+          <div className="p-3 rounded-lg bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800/30">
+            <p className="text-xs text-purple-700 dark:text-purple-400">
+              <strong>Note:</strong> Adding a new admin will mint a new AdminCap object and transfer it to the specified address. 
+              The recipient will immediately gain full admin privileges. Only existing admins can add new admins.
             </p>
           </div>
         </div>
