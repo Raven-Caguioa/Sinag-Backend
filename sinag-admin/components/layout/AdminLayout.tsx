@@ -19,7 +19,8 @@ import {
   BarChart3,
   Lock,
   AlertTriangle,
-  Shield
+  Shield,
+  Settings
 } from "lucide-react";
 import { isAdmin } from "@/lib/admins";
 
@@ -52,7 +53,8 @@ export const AdminLayout: FC<AdminLayoutProps> = ({ children }) => {
     { href: "/withdraw-funds", label: "Withdraw Funds", icon: DollarSign },
     { href: "/open-yield-round", label: "Open Yield Round", icon: TrendingUp },
     { href: "/close-yield-round", label: "Close Yield Round", icon: Lock },
-    { href: "/yield-statistics", label: "Yield Statistics", icon: BarChart3 }, 
+    { href: "/yield-statistics", label: "Yield Statistics", icon: BarChart3 },
+    { href: "/settings", label: "Platform Settings", icon: Settings }, 
   ];
 
   // Show connect wallet screen if not connected

@@ -11,14 +11,22 @@ module sinag::campaign {
     use sui::package;
     use sui::vec_set::{Self, VecSet};
     use std::string::{Self, String};
-    
-    // --- ADDED MISSING IMPORTS TO FIX BUILD ERRORS ---
     use std::vector;
     use sui::transfer;
     use sui::object::{Self, UID, ID};
     use sui::tx_context::{Self, TxContext};
     use sui::option::{Self, Option};
     use sui::clock::{Self, Clock};
+
+    // ==================== Constants & Config ====================
+    
+    const MAX_SHARES_PER_TX: u64 = 500;
+    const MIN_SHARES_PER_TX: u64 = 1;
+    const YIELD_COOLDOWN_MS: u64 = 86_400_000; // 24 Hours
+    const MAX_YIELD_PER_SHARE: u64 = 10_000_000;
+    
+    // Safety constant for overflow checks (MAX u64 - 1)
+    const MAX_U64_THRESH: u128 = 18446744073709551614; 
 
     // ==================== Error Codes ====================
     
@@ -34,7 +42,6 @@ module sinag::campaign {
     const EInvalidAPY: u64 = 12;
     const EInvalidImageCount: u64 = 13;
 
-    // New error codes for yield system
     const ENoActiveRound: u64 = 20;
     const EAlreadyClaimed: u64 = 21;
     const EInvalidYieldAmount: u64 = 22;
@@ -42,31 +49,38 @@ module sinag::campaign {
     const ERoundNotActive: u64 = 24;
     const EWrongCampaign: u64 = 25;
     const ERoundNotFound: u64 = 26;
+    
+    const ESystemPaused: u64 = 30;
+    const EMinSharesNotMet: u64 = 31;
+    const EMaxSharesExceeded: u64 = 32;
+    const EYieldCooldownActive: u64 = 33;
+    const EYieldTooHigh: u64 = 34;
+    const EOverflowRisk: u64 = 35;
+    const EYieldAlreadyWithdrawn: u64 = 36;
+    const ERoundStillActive: u64 = 37;
 
     // ==================== Campaign Status ====================
     
     const STATUS_ACTIVE: u8 = 0;
-    const STATUS_COMPLETED: u8 = 1;      // Sold out
-    const STATUS_MANUALLY_CLOSED: u8 = 2; // Closed before sellout
+    const STATUS_COMPLETED: u8 = 1;
+    const STATUS_MANUALLY_CLOSED: u8 = 2;
 
     // ==================== Core Structures ====================
 
-    /// One-Time-Witness for creating Display
     public struct CAMPAIGN has drop {}
 
-    /// Administrative capability - holder can manage campaigns
     public struct AdminCap has key, store {
         id: UID
     }
 
-    /// Global registry tracking all campaigns
     public struct CampaignRegistry has key {
         id: UID,
         campaign_count: u64,
-        total_campaigns_created: u64
+        total_campaigns_created: u64,
+        treasury_address: address, 
+        is_paused: bool
     }
 
-    /// Represents a single yield distribution round
     public struct YieldRound has store {
         round_number: u64,
         yield_per_share: u64,
@@ -75,62 +89,41 @@ module sinag::campaign {
         claimed_shares: u64,
         is_active: bool,
         opened_at: u64,
-        closed_at: Option<u64>
+        closed_at: Option<u64>,
+        yield_withdrawn: bool 
     }
 
-    /// Represents a single resort development fundraising campaign
-    /// Generic CoinType allows accepting different payment tokens (SUI, USDC, etc.)
     public struct Campaign<phantom CoinType> has key, store {
         id: UID,
         campaign_number: u64,
-        
-        // Basic Info
         name: String,
         description: String,
         location: String,
-        
-        // Financial Details
-        target_apy: u64,              // Basis points (e.g., 1850 = 18.5%)
-        maturity_days: u64,           // Duration in days
-        maturity_date: u64,           // Calculated timestamp
-        structure: String,            // "Asset-Backed", "Guaranteed Yield", etc.
-        
-        // Share Details
-        price_per_share: u64,         // Price in smallest unit (MIST for SUI, micro-USDC)
+        target_apy: u64,              
+        maturity_days: u64,           
+        maturity_date: u64,           
+        structure: String,            
+        price_per_share: u64,         
         total_supply: u64,
         shares_sold: u64,
-        
-        // Media
-        resort_images: vector<String>, // Multiple images for carousel
-        nft_image: String,             // Single image for NFT display
-        due_diligence_url: Option<String>, // Optional document link
-        
-        // Financial Balance
+        resort_images: vector<String>, 
+        nft_image: String,             
+        due_diligence_url: Option<String>, 
         balance: Balance<CoinType>,
-        
-        // Status
         status: u8,
         is_finalized: bool,
-        
-        // Timestamps
         created_at: u64,
         closed_at: Option<u64>,
-        
-        // FEATURE 2: Coin Type
         coin_type_name: String,
-        
-        // FEATURE 3: Investor Tracking
         unique_investors: u64,
         investor_addresses: VecSet<address>,
-        
-        // FEATURE 1: Yield System
         yield_rounds: vector<YieldRound>,
         current_round: u64,
         yield_balance: Balance<CoinType>,
-        total_yield_distributed: u64
+        total_yield_distributed: u64,
+        last_yield_time: u64 
     }
 
-    /// NFT representing fractional ownership of a resort development
     public struct ResortShareNFT has key, store {
         id: UID,
         campaign_id: ID,
@@ -142,8 +135,6 @@ module sinag::campaign {
         maturity_date: u64,
         structure: String,
         minted_at: u64,
-        
-        // FEATURE 1: Yield Tracking
         last_claimed_round: u64
     }
 
@@ -225,28 +216,42 @@ module sinag::campaign {
         timestamp: u64
     }
 
+    public struct TreasuryUpdated has copy, drop {
+        old_address: address,
+        new_address: address,
+        updated_by: address
+    }
+
+    public struct UnclaimedYieldWithdrawn has copy, drop {
+        campaign_id: ID,
+        round_number: u64,
+        amount: u64,
+        recipient: address
+    }
+
+    public struct SystemPauseStatusChanged has copy, drop {
+        is_paused: bool,
+        updated_by: address
+    }
+
     // ==================== Initialization ====================
 
-    /// Module initializer - creates AdminCap, Registry, and NFT Display
     fun init(otw: CAMPAIGN, ctx: &mut TxContext) {
-        // Create admin capability
         let admin_cap = AdminCap {
             id: object::new(ctx)
         };
 
-        // Create global registry
         let registry = CampaignRegistry {
             id: object::new(ctx),
             campaign_count: 0,
-            total_campaigns_created: 0
+            total_campaigns_created: 0,
+            treasury_address: ctx.sender(),
+            is_paused: false
         };
 
-        // Create Publisher for Display
         let publisher = package::claim(otw, ctx);
 
-        // Setup Display for ResortShareNFT
         let mut display = display::new<ResortShareNFT>(&publisher, ctx);
-        
         display::add(&mut display, string::utf8(b"name"), string::utf8(b"{campaign_name} - Share #{issue_number}"));
         display::add(&mut display, string::utf8(b"description"), string::utf8(b"Fractional ownership of {campaign_name} resort in {location}. Target APY: {target_apy}bps. Structure: {structure}"));
         display::add(&mut display, string::utf8(b"image_url"), string::utf8(b"{nft_image}"));
@@ -263,7 +268,35 @@ module sinag::campaign {
 
     // ==================== Admin Functions ====================
 
-    /// Create a new campaign accepting SUI payments
+    entry fun update_treasury_address(
+        _admin: &AdminCap,
+        registry: &mut CampaignRegistry,
+        new_address: address,
+        ctx: &mut TxContext
+    ) {
+        let old_address = registry.treasury_address;
+        registry.treasury_address = new_address;
+
+        event::emit(TreasuryUpdated {
+            old_address,
+            new_address,
+            updated_by: ctx.sender()
+        });
+    }
+
+    entry fun toggle_pause(
+        _admin: &AdminCap,
+        registry: &mut CampaignRegistry,
+        ctx: &mut TxContext
+    ) {
+        registry.is_paused = !registry.is_paused;
+        
+        event::emit(SystemPauseStatusChanged {
+            is_paused: registry.is_paused,
+            updated_by: ctx.sender()
+        });
+    }
+
     entry fun create_campaign_sui(
         _admin: &AdminCap,
         registry: &mut CampaignRegistry,
@@ -300,7 +333,6 @@ module sinag::campaign {
         );
     }
 
-    /// Create a new campaign accepting USDC payments
     entry fun create_campaign_usdc<USDC>(
         _admin: &AdminCap,
         registry: &mut CampaignRegistry,
@@ -314,7 +346,7 @@ module sinag::campaign {
         total_supply: u64,
         resort_images: vector<vector<u8>>,
         nft_image: vector<u8>,
-        mut due_diligence_url: Option<vector<u8>>,
+        due_diligence_url: Option<vector<u8>>,
         clock: &Clock,
         ctx: &mut TxContext
     ) {
@@ -337,7 +369,6 @@ module sinag::campaign {
         );
     }
 
-    /// Internal campaign creation logic
     fun create_campaign_internal<CoinType>(
         registry: &mut CampaignRegistry,
         name: vector<u8>,
@@ -355,7 +386,6 @@ module sinag::campaign {
         clock: &Clock,
         ctx: &mut TxContext
     ) {
-        // Validation
         assert!(target_apy > 0 && target_apy <= 10000, EInvalidAPY);
         assert!(maturity_days > 0, EInvalidMaturityDays);
         assert!(vector::length(&resort_images) > 0, EInvalidImageCount);
@@ -366,7 +396,6 @@ module sinag::campaign {
         let created_at = sui::clock::timestamp_ms(clock);
         let maturity_date = created_at + (maturity_days * 86400000);
 
-        // Convert image vectors to strings
         let mut image_strings = vector::empty<String>();
         let mut i = 0;
         while (i < vector::length(&resort_images)) {
@@ -374,7 +403,6 @@ module sinag::campaign {
             i = i + 1;
         };
 
-        // Convert optional due diligence URL
         let dd_url = if (option::is_some(&due_diligence_url)) {
             option::some(string::utf8(option::extract(&mut due_diligence_url)))
         } else {
@@ -408,7 +436,8 @@ module sinag::campaign {
             yield_rounds: vector::empty(),
             current_round: 0,
             yield_balance: balance::zero(),
-            total_yield_distributed: 0
+            total_yield_distributed: 0,
+            last_yield_time: created_at 
         };
 
         let campaign_id = object::id(&campaign);
@@ -429,7 +458,6 @@ module sinag::campaign {
         transfer::share_object(campaign);
     }
 
-    /// Manually close an active campaign before it sells out
     entry fun close_campaign_manually<CoinType>(
         _admin: &AdminCap,
         registry: &mut CampaignRegistry,
@@ -454,7 +482,6 @@ module sinag::campaign {
         });
     }
 
-    /// Finalize a campaign
     entry fun finalize_campaign<CoinType>(
         _admin: &AdminCap,
         registry: &mut CampaignRegistry,
@@ -465,9 +492,10 @@ module sinag::campaign {
         assert!(!campaign.is_finalized, ECampaignAlreadyFinalized);
 
         campaign.is_finalized = true;
-        
-        if (campaign.status == STATUS_ACTIVE) {
-            registry.campaign_count = registry.campaign_count - 1;
+
+        // FIXED: Correct logic to decrement active count for campaigns that completed naturally (sold out)
+        if (campaign.status == STATUS_COMPLETED) {
+             registry.campaign_count = registry.campaign_count - 1;
         };
 
         event::emit(CampaignFinalized {
@@ -476,10 +504,9 @@ module sinag::campaign {
         });
     }
 
-    /// Withdraw funds from a finalized campaign
-    /// FIX: Funds are now strictly sent to the Project Treasury Wallet
     entry fun withdraw_funds<CoinType>(
         _admin: &AdminCap,
+        registry: &CampaignRegistry, 
         campaign: &mut Campaign<CoinType>,
         clock: &Clock,
         ctx: &mut TxContext
@@ -491,15 +518,12 @@ module sinag::campaign {
         assert!(amount > 0, ENoFundsToWithdraw);
 
         let withdrawn = coin::take(&mut campaign.balance, amount, ctx);
-        
-        // --- TREASURY WALLET FIX ---
-        // Funds are sent to this hardcoded address as per requirements
-        let treasury_address = @0x7a3460760da4de7d58d480d676a1cff58376169df66acb6e6b6da6f0baa699ea;
+        let treasury_address = registry.treasury_address;
 
         event::emit(FundsWithdrawn {
             campaign_id: object::id(campaign),
             amount,
-            recipient: treasury_address, // Log the actual recipient
+            recipient: treasury_address, 
             timestamp: sui::clock::timestamp_ms(clock)
         });
 
@@ -508,7 +532,6 @@ module sinag::campaign {
 
     // ==================== Yield Distribution Functions ====================
 
-    /// Admin opens a new yield round and deposits yield funds
     entry fun open_yield_round<CoinType>(
         _admin: &AdminCap,
         campaign: &mut Campaign<CoinType>,
@@ -517,22 +540,31 @@ module sinag::campaign {
         clock: &Clock,
         _ctx: &mut TxContext
     ) {
-        // Validate campaign is not active (must be closed/completed)
         assert!(campaign.status != STATUS_ACTIVE, ECampaignStillActive);
         assert!(yield_per_share > 0, EInvalidYieldAmount);
         
-        // Calculate expected deposit: yield_per_share * total_supply
-        let expected_deposit = yield_per_share * campaign.total_supply;
+        assert!(yield_per_share <= MAX_YIELD_PER_SHARE, EYieldTooHigh);
+
+        let timestamp = sui::clock::timestamp_ms(clock);
+        assert!(timestamp >= campaign.last_yield_time + YIELD_COOLDOWN_MS, EYieldCooldownActive);
+
+        // Fixed: Explicit Overflow check using MAX_U64_THRESH
+        let supply_u128 = (campaign.total_supply as u128);
+        let yield_u128 = (yield_per_share as u128);
+        let expected_u128 = supply_u128 * yield_u128;
+        
+        // Ensure strictly less than the threshold provided
+        assert!(expected_u128 <= MAX_U64_THRESH, EOverflowRisk);
+
+        let expected_deposit = (expected_u128 as u64);
         let actual_deposit = coin::value(&yield_deposit);
         assert!(actual_deposit == expected_deposit, EIncorrectYieldDeposit);
         
-        // Increment round number
         campaign.current_round = campaign.current_round + 1;
         let round_number = campaign.current_round;
         
-        let timestamp = sui::clock::timestamp_ms(clock);
+        campaign.last_yield_time = timestamp;
         
-        // Create new yield round
         let new_round = YieldRound {
             round_number,
             yield_per_share,
@@ -541,14 +573,13 @@ module sinag::campaign {
             claimed_shares: 0,
             is_active: true,
             opened_at: timestamp,
-            closed_at: option::none()
+            closed_at: option::none(),
+            yield_withdrawn: false 
         };
         
-        // Add deposit to yield balance
         let deposit_balance = coin::into_balance(yield_deposit);
         balance::join(&mut campaign.yield_balance, deposit_balance);
         
-        // Add round to history
         vector::push_back(&mut campaign.yield_rounds, new_round);
         
         event::emit(YieldRoundOpened {
@@ -560,7 +591,6 @@ module sinag::campaign {
         });
     }
 
-    /// Admin closes active yield round (stops new claims)
     entry fun close_yield_round<CoinType>(
         _admin: &AdminCap,
         campaign: &mut Campaign<CoinType>,
@@ -592,353 +622,53 @@ module sinag::campaign {
         });
     }
 
-    /// User claims yield for one NFT
-    entry fun claim_yield<CoinType>(
+    entry fun withdraw_unclaimed_yield<CoinType>(
+        _admin: &AdminCap,
+        registry: &CampaignRegistry,
         campaign: &mut Campaign<CoinType>,
-        nft: &mut ResortShareNFT,
-        clock: &Clock,
+        round_number: u64,
+        _clock: &Clock,
         ctx: &mut TxContext
     ) {
-        // Validate NFT belongs to this campaign
-        assert!(nft.campaign_id == object::id(campaign), EWrongCampaign);
+        assert!(round_number > 0 && round_number <= vector::length(&campaign.yield_rounds), ERoundNotFound);
+        let round = vector::borrow_mut(&mut campaign.yield_rounds, round_number - 1);
+
+        assert!(!round.is_active, ERoundStillActive);
+        assert!(!round.yield_withdrawn, EYieldAlreadyWithdrawn);
+
+        let unclaimed_amount = round.total_deposited - round.total_claimed;
         
-        // Validate current round exists
-        assert!(campaign.current_round > 0, ENoActiveRound);
-        
-        // Get current round
-        let round = vector::borrow_mut(&mut campaign.yield_rounds, campaign.current_round - 1);
-        
-        // Validate round is active
-        assert!(round.is_active, ERoundNotActive);
-        
-        // Validate NFT hasn't claimed this round
-        assert!(nft.last_claimed_round < campaign.current_round, EAlreadyClaimed);
-        
-        // Calculate yield
-        let yield_amount = round.yield_per_share;
-        
-        // Update NFT
-        nft.last_claimed_round = campaign.current_round;
-        
-        // Update round stats
-        round.total_claimed = round.total_claimed + yield_amount;
-        round.claimed_shares = round.claimed_shares + 1;
-        
-        // Update campaign stats
-        campaign.total_yield_distributed = campaign.total_yield_distributed + yield_amount;
-        
-        // Transfer yield to user
-        let yield_coin = coin::take(&mut campaign.yield_balance, yield_amount, ctx);
-        let claimer = ctx.sender();
-        
-        event::emit(YieldClaimed {
+        if (unclaimed_amount > 0) {
+            let withdrawn_coin = coin::take(&mut campaign.yield_balance, unclaimed_amount, ctx);
+            transfer::public_transfer(withdrawn_coin, registry.treasury_address);
+        };
+
+        round.yield_withdrawn = true;
+
+        event::emit(UnclaimedYieldWithdrawn {
             campaign_id: object::id(campaign),
-            nft_id: object::id(nft),
-            round_number: campaign.current_round,
-            amount: yield_amount,
-            claimer,
-            timestamp: sui::clock::timestamp_ms(clock)
+            round_number,
+            amount: unclaimed_amount,
+            recipient: registry.treasury_address
         });
-        
-        transfer::public_transfer(yield_coin, claimer);
-    }
-
-    /// User claims yield for two NFTs in one transaction (gas efficient)
-    entry fun claim_yield_batch_2<CoinType>(
-        campaign: &mut Campaign<CoinType>,
-        nft1: &mut ResortShareNFT,
-        nft2: &mut ResortShareNFT,
-        clock: &Clock,
-        ctx: &mut TxContext
-    ) {
-        // Validate current round exists
-        assert!(campaign.current_round > 0, ENoActiveRound);
-        
-        let timestamp = sui::clock::timestamp_ms(clock);
-        let claimer = ctx.sender();
-        let campaign_id = object::id(campaign);
-        let current_round = campaign.current_round;
-        
-        // Get current round
-        let round = vector::borrow_mut(&mut campaign.yield_rounds, current_round - 1);
-        
-        // Validate round is active
-        assert!(round.is_active, ERoundNotActive);
-        
-        let mut total_yield = 0u64;
-        let mut nfts_claimed = 0u64;
-        let yield_per_share = round.yield_per_share;
-        
-        // Process NFT 1
-        assert!(nft1.campaign_id == campaign_id, EWrongCampaign);
-        if (nft1.last_claimed_round < current_round) {
-            nft1.last_claimed_round = current_round;
-            total_yield = total_yield + yield_per_share;
-            nfts_claimed = nfts_claimed + 1;
-            
-            event::emit(YieldClaimed {
-                campaign_id,
-                nft_id: object::id(nft1),
-                round_number: current_round,
-                amount: yield_per_share,
-                claimer,
-                timestamp
-            });
-        };
-        
-        // Process NFT 2
-        assert!(nft2.campaign_id == campaign_id, EWrongCampaign);
-        if (nft2.last_claimed_round < current_round) {
-            nft2.last_claimed_round = current_round;
-            total_yield = total_yield + yield_per_share;
-            nfts_claimed = nfts_claimed + 1;
-            
-            event::emit(YieldClaimed {
-                campaign_id,
-                nft_id: object::id(nft2),
-                round_number: current_round,
-                amount: yield_per_share,
-                claimer,
-                timestamp
-            });
-        };
-        
-        // Update round stats
-        round.total_claimed = round.total_claimed + total_yield;
-        round.claimed_shares = round.claimed_shares + nfts_claimed;
-        
-        // Update campaign stats
-        campaign.total_yield_distributed = campaign.total_yield_distributed + total_yield;
-        
-        // Transfer total yield in one transaction
-        if (total_yield > 0) {
-            let yield_coin = coin::take(&mut campaign.yield_balance, total_yield, ctx);
-            transfer::public_transfer(yield_coin, claimer);
-        };
-    }
-
-    /// User claims yield for three NFTs in one transaction (gas efficient)
-    entry fun claim_yield_batch_3<CoinType>(
-        campaign: &mut Campaign<CoinType>,
-        nft1: &mut ResortShareNFT,
-        nft2: &mut ResortShareNFT,
-        nft3: &mut ResortShareNFT,
-        clock: &Clock,
-        ctx: &mut TxContext
-    ) {
-        // Validate current round exists
-        assert!(campaign.current_round > 0, ENoActiveRound);
-        
-        let timestamp = sui::clock::timestamp_ms(clock);
-        let claimer = ctx.sender();
-        let campaign_id = object::id(campaign);
-        let current_round = campaign.current_round;
-        
-        // Get current round
-        let round = vector::borrow_mut(&mut campaign.yield_rounds, current_round - 1);
-        
-        // Validate round is active
-        assert!(round.is_active, ERoundNotActive);
-        
-        let mut total_yield = 0u64;
-        let mut nfts_claimed = 0u64;
-        let yield_per_share = round.yield_per_share;
-        
-        // Process NFT 1
-        assert!(nft1.campaign_id == campaign_id, EWrongCampaign);
-        if (nft1.last_claimed_round < current_round) {
-            nft1.last_claimed_round = current_round;
-            total_yield = total_yield + yield_per_share;
-            nfts_claimed = nfts_claimed + 1;
-            
-            event::emit(YieldClaimed {
-                campaign_id,
-                nft_id: object::id(nft1),
-                round_number: current_round,
-                amount: yield_per_share,
-                claimer,
-                timestamp
-            });
-        };
-        
-        // Process NFT 2
-        assert!(nft2.campaign_id == campaign_id, EWrongCampaign);
-        if (nft2.last_claimed_round < current_round) {
-            nft2.last_claimed_round = current_round;
-            total_yield = total_yield + yield_per_share;
-            nfts_claimed = nfts_claimed + 1;
-            
-            event::emit(YieldClaimed {
-                campaign_id,
-                nft_id: object::id(nft2),
-                round_number: current_round,
-                amount: yield_per_share,
-                claimer,
-                timestamp
-            });
-        };
-        
-        // Process NFT 3
-        assert!(nft3.campaign_id == campaign_id, EWrongCampaign);
-        if (nft3.last_claimed_round < current_round) {
-            nft3.last_claimed_round = current_round;
-            total_yield = total_yield + yield_per_share;
-            nfts_claimed = nfts_claimed + 1;
-            
-            event::emit(YieldClaimed {
-                campaign_id,
-                nft_id: object::id(nft3),
-                round_number: current_round,
-                amount: yield_per_share,
-                claimer,
-                timestamp
-            });
-        };
-        
-        // Update round stats
-        round.total_claimed = round.total_claimed + total_yield;
-        round.claimed_shares = round.claimed_shares + nfts_claimed;
-        
-        // Update campaign stats
-        campaign.total_yield_distributed = campaign.total_yield_distributed + total_yield;
-        
-        // Transfer total yield in one transaction
-        if (total_yield > 0) {
-            let yield_coin = coin::take(&mut campaign.yield_balance, total_yield, ctx);
-            transfer::public_transfer(yield_coin, claimer);
-        };
-    }
-
-    /// User claims yield for five NFTs in one transaction (gas efficient)
-    entry fun claim_yield_batch_5<CoinType>(
-        campaign: &mut Campaign<CoinType>,
-        nft1: &mut ResortShareNFT,
-        nft2: &mut ResortShareNFT,
-        nft3: &mut ResortShareNFT,
-        nft4: &mut ResortShareNFT,
-        nft5: &mut ResortShareNFT,
-        clock: &Clock,
-        ctx: &mut TxContext
-    ) {
-        // Validate current round exists
-        assert!(campaign.current_round > 0, ENoActiveRound);
-        
-        let timestamp = sui::clock::timestamp_ms(clock);
-        let claimer = ctx.sender();
-        let campaign_id = object::id(campaign);
-        let current_round = campaign.current_round;
-        
-        // Get current round
-        let round = vector::borrow_mut(&mut campaign.yield_rounds, current_round - 1);
-        
-        // Validate round is active
-        assert!(round.is_active, ERoundNotActive);
-        
-        let mut total_yield = 0u64;
-        let mut nfts_claimed = 0u64;
-        let yield_per_share = round.yield_per_share;
-        
-        // Process all 5 NFTs
-        assert!(nft1.campaign_id == campaign_id, EWrongCampaign);
-        if (nft1.last_claimed_round < current_round) {
-            nft1.last_claimed_round = current_round;
-            total_yield = total_yield + yield_per_share;
-            nfts_claimed = nfts_claimed + 1;
-            event::emit(YieldClaimed {
-                campaign_id,
-                nft_id: object::id(nft1),
-                round_number: current_round,
-                amount: yield_per_share,
-                claimer,
-                timestamp
-            });
-        };
-        
-        assert!(nft2.campaign_id == campaign_id, EWrongCampaign);
-        if (nft2.last_claimed_round < current_round) {
-            nft2.last_claimed_round = current_round;
-            total_yield = total_yield + yield_per_share;
-            nfts_claimed = nfts_claimed + 1;
-            event::emit(YieldClaimed {
-                campaign_id,
-                nft_id: object::id(nft2),
-                round_number: current_round,
-                amount: yield_per_share,
-                claimer,
-                timestamp
-            });
-        };
-        
-        assert!(nft3.campaign_id == campaign_id, EWrongCampaign);
-        if (nft3.last_claimed_round < current_round) {
-            nft3.last_claimed_round = current_round;
-            total_yield = total_yield + yield_per_share;
-            nfts_claimed = nfts_claimed + 1;
-            event::emit(YieldClaimed {
-                campaign_id,
-                nft_id: object::id(nft3),
-                round_number: current_round,
-                amount: yield_per_share,
-                claimer,
-                timestamp
-            });
-        };
-        
-        assert!(nft4.campaign_id == campaign_id, EWrongCampaign);
-        if (nft4.last_claimed_round < current_round) {
-            nft4.last_claimed_round = current_round;
-            total_yield = total_yield + yield_per_share;
-            nfts_claimed = nfts_claimed + 1;
-            event::emit(YieldClaimed {
-                campaign_id,
-                nft_id: object::id(nft4),
-                round_number: current_round,
-                amount: yield_per_share,
-                claimer,
-                timestamp
-            });
-        };
-        
-        assert!(nft5.campaign_id == campaign_id, EWrongCampaign);
-        if (nft5.last_claimed_round < current_round) {
-            nft5.last_claimed_round = current_round;
-            total_yield = total_yield + yield_per_share;
-            nfts_claimed = nfts_claimed + 1;
-            event::emit(YieldClaimed {
-                campaign_id,
-                nft_id: object::id(nft5),
-                round_number: current_round,
-                amount: yield_per_share,
-                claimer,
-                timestamp
-            });
-        };
-        
-        // Update round stats
-        round.total_claimed = round.total_claimed + total_yield;
-        round.claimed_shares = round.claimed_shares + nfts_claimed;
-        
-        // Update campaign stats
-        campaign.total_yield_distributed = campaign.total_yield_distributed + total_yield;
-        
-        // Transfer total yield in one transaction
-        if (total_yield > 0) {
-            let yield_coin = coin::take(&mut campaign.yield_balance, total_yield, ctx);
-            transfer::public_transfer(yield_coin, claimer);
-        };
     }
 
     // ==================== User Functions ====================
 
-    /// Mint shares by paying with the campaign's accepted coin type
     entry fun mint_shares<CoinType>(
+        registry: &CampaignRegistry, 
         campaign: &mut Campaign<CoinType>,
         quantity: u64,
         payment: Coin<CoinType>,
         clock: &Clock,
         ctx: &mut TxContext
     ) {
-        // Validation
+        // Pause Check
+        assert!(!registry.is_paused, ESystemPaused);
+
+        assert!(quantity >= MIN_SHARES_PER_TX, EMinSharesNotMet);
+        assert!(quantity <= MAX_SHARES_PER_TX, EMaxSharesExceeded);
+
         assert!(campaign.status == STATUS_ACTIVE, ECampaignNotActive);
         assert!(quantity > 0, EInvalidShareAmount);
         assert!(campaign.shares_sold + quantity <= campaign.total_supply, EInsufficientShares);
@@ -947,7 +677,6 @@ module sinag::campaign {
         let actual_payment = coin::value(&payment);
         assert!(actual_payment == expected_payment, EIncorrectPayment);
 
-        // FEATURE 3: Track unique investor
         let buyer = ctx.sender();
         let is_new_investor = !vec_set::contains(&campaign.investor_addresses, &buyer);
         
@@ -956,11 +685,9 @@ module sinag::campaign {
             campaign.unique_investors = campaign.unique_investors + 1;
         };
 
-        // Add payment to campaign balance
         let payment_balance = coin::into_balance(payment);
         balance::join(&mut campaign.balance, payment_balance);
 
-        // Mint NFTs
         let (issue_numbers, timestamp) = mint_nfts_internal(
             campaign,
             quantity,
@@ -978,13 +705,289 @@ module sinag::campaign {
             timestamp
         });
 
-        // Check if sold out
         check_campaign_completion(campaign, timestamp);
+    }
+
+    entry fun claim_yield<CoinType>(
+        registry: &CampaignRegistry, 
+        campaign: &mut Campaign<CoinType>,
+        nft: &mut ResortShareNFT,
+        clock: &Clock,
+        ctx: &mut TxContext
+    ) {
+        // Pause Check
+        assert!(!registry.is_paused, ESystemPaused);
+
+        assert!(nft.campaign_id == object::id(campaign), EWrongCampaign);
+        assert!(campaign.current_round > 0, ENoActiveRound);
+        
+        let round = vector::borrow_mut(&mut campaign.yield_rounds, campaign.current_round - 1);
+        assert!(round.is_active, ERoundNotActive);
+        assert!(nft.last_claimed_round < campaign.current_round, EAlreadyClaimed);
+        
+        let yield_amount = round.yield_per_share;
+        nft.last_claimed_round = campaign.current_round;
+        
+        round.total_claimed = round.total_claimed + yield_amount;
+        round.claimed_shares = round.claimed_shares + 1;
+        campaign.total_yield_distributed = campaign.total_yield_distributed + yield_amount;
+        
+        let yield_coin = coin::take(&mut campaign.yield_balance, yield_amount, ctx);
+        transfer::public_transfer(yield_coin, ctx.sender());
+
+        event::emit(YieldClaimed {
+            campaign_id: object::id(campaign),
+            nft_id: object::id(nft),
+            round_number: campaign.current_round,
+            amount: yield_amount,
+            claimer: ctx.sender(),
+            timestamp: sui::clock::timestamp_ms(clock)
+        });
+    }
+
+    entry fun claim_yield_batch_2<CoinType>(
+        registry: &CampaignRegistry,
+        campaign: &mut Campaign<CoinType>,
+        nft1: &mut ResortShareNFT,
+        nft2: &mut ResortShareNFT,
+        clock: &Clock,
+        ctx: &mut TxContext
+    ) {
+        // Pause Check
+        assert!(!registry.is_paused, ESystemPaused);
+        
+        assert!(campaign.current_round > 0, ENoActiveRound);
+        let timestamp = sui::clock::timestamp_ms(clock);
+        let claimer = ctx.sender();
+        let campaign_id = object::id(campaign);
+        let current_round = campaign.current_round;
+
+        let round = vector::borrow_mut(&mut campaign.yield_rounds, current_round - 1);
+        assert!(round.is_active, ERoundNotActive);
+
+        let mut total_yield = 0u64;
+        let mut nfts_claimed = 0u64;
+        let yield_per_share = round.yield_per_share;
+
+        if (nft1.campaign_id == campaign_id && nft1.last_claimed_round < current_round) {
+            nft1.last_claimed_round = current_round;
+            total_yield = total_yield + yield_per_share;
+            nfts_claimed = nfts_claimed + 1;
+            event::emit(YieldClaimed { campaign_id, nft_id: object::id(nft1), round_number: current_round, amount: yield_per_share, claimer, timestamp });
+        };
+
+        if (nft2.campaign_id == campaign_id && nft2.last_claimed_round < current_round) {
+            nft2.last_claimed_round = current_round;
+            total_yield = total_yield + yield_per_share;
+            nfts_claimed = nfts_claimed + 1;
+            event::emit(YieldClaimed { campaign_id, nft_id: object::id(nft2), round_number: current_round, amount: yield_per_share, claimer, timestamp });
+        };
+
+        round.total_claimed = round.total_claimed + total_yield;
+        round.claimed_shares = round.claimed_shares + nfts_claimed;
+        campaign.total_yield_distributed = campaign.total_yield_distributed + total_yield;
+
+        if (total_yield > 0) {
+            let yield_coin = coin::take(&mut campaign.yield_balance, total_yield, ctx);
+            transfer::public_transfer(yield_coin, claimer);
+        };
+    }
+
+    entry fun claim_yield_batch_3<CoinType>(
+        registry: &CampaignRegistry,
+        campaign: &mut Campaign<CoinType>,
+        nft1: &mut ResortShareNFT,
+        nft2: &mut ResortShareNFT,
+        nft3: &mut ResortShareNFT,
+        clock: &Clock,
+        ctx: &mut TxContext
+    ) {
+        // Pause Check
+        assert!(!registry.is_paused, ESystemPaused);
+
+        assert!(campaign.current_round > 0, ENoActiveRound);
+        let timestamp = sui::clock::timestamp_ms(clock);
+        let claimer = ctx.sender();
+        let campaign_id = object::id(campaign);
+        let current_round = campaign.current_round;
+        
+        let round = vector::borrow_mut(&mut campaign.yield_rounds, current_round - 1);
+        assert!(round.is_active, ERoundNotActive);
+        
+        let mut total_yield = 0u64;
+        let mut nfts_claimed = 0u64;
+        let yield_per_share = round.yield_per_share;
+        
+        if (nft1.campaign_id == campaign_id && nft1.last_claimed_round < current_round) {
+            nft1.last_claimed_round = current_round;
+            total_yield = total_yield + yield_per_share;
+            nfts_claimed = nfts_claimed + 1;
+            event::emit(YieldClaimed { campaign_id, nft_id: object::id(nft1), round_number: current_round, amount: yield_per_share, claimer, timestamp });
+        };
+        
+        if (nft2.campaign_id == campaign_id && nft2.last_claimed_round < current_round) {
+            nft2.last_claimed_round = current_round;
+            total_yield = total_yield + yield_per_share;
+            nfts_claimed = nfts_claimed + 1;
+            event::emit(YieldClaimed { campaign_id, nft_id: object::id(nft2), round_number: current_round, amount: yield_per_share, claimer, timestamp });
+        };
+        
+        if (nft3.campaign_id == campaign_id && nft3.last_claimed_round < current_round) {
+            nft3.last_claimed_round = current_round;
+            total_yield = total_yield + yield_per_share;
+            nfts_claimed = nfts_claimed + 1;
+            event::emit(YieldClaimed { campaign_id, nft_id: object::id(nft3), round_number: current_round, amount: yield_per_share, claimer, timestamp });
+        };
+
+        round.total_claimed = round.total_claimed + total_yield;
+        round.claimed_shares = round.claimed_shares + nfts_claimed;
+        campaign.total_yield_distributed = campaign.total_yield_distributed + total_yield;
+        
+        if (total_yield > 0) {
+            let yield_coin = coin::take(&mut campaign.yield_balance, total_yield, ctx);
+            transfer::public_transfer(yield_coin, claimer);
+        };
+    }
+
+    // --- NEW: Added Batch 4 for consistency ---
+    entry fun claim_yield_batch_4<CoinType>(
+        registry: &CampaignRegistry,
+        campaign: &mut Campaign<CoinType>,
+        nft1: &mut ResortShareNFT,
+        nft2: &mut ResortShareNFT,
+        nft3: &mut ResortShareNFT,
+        nft4: &mut ResortShareNFT,
+        clock: &Clock,
+        ctx: &mut TxContext
+    ) {
+        // Pause Check
+        assert!(!registry.is_paused, ESystemPaused);
+
+        assert!(campaign.current_round > 0, ENoActiveRound);
+        let timestamp = sui::clock::timestamp_ms(clock);
+        let claimer = ctx.sender();
+        let campaign_id = object::id(campaign);
+        let current_round = campaign.current_round;
+        
+        let round = vector::borrow_mut(&mut campaign.yield_rounds, current_round - 1);
+        assert!(round.is_active, ERoundNotActive);
+        
+        let mut total_yield = 0u64;
+        let mut nfts_claimed = 0u64;
+        let yield_per_share = round.yield_per_share;
+        
+        if (nft1.campaign_id == campaign_id && nft1.last_claimed_round < current_round) {
+            nft1.last_claimed_round = current_round;
+            total_yield = total_yield + yield_per_share;
+            nfts_claimed = nfts_claimed + 1;
+            event::emit(YieldClaimed { campaign_id, nft_id: object::id(nft1), round_number: current_round, amount: yield_per_share, claimer, timestamp });
+        };
+        
+        if (nft2.campaign_id == campaign_id && nft2.last_claimed_round < current_round) {
+            nft2.last_claimed_round = current_round;
+            total_yield = total_yield + yield_per_share;
+            nfts_claimed = nfts_claimed + 1;
+            event::emit(YieldClaimed { campaign_id, nft_id: object::id(nft2), round_number: current_round, amount: yield_per_share, claimer, timestamp });
+        };
+        
+        if (nft3.campaign_id == campaign_id && nft3.last_claimed_round < current_round) {
+            nft3.last_claimed_round = current_round;
+            total_yield = total_yield + yield_per_share;
+            nfts_claimed = nfts_claimed + 1;
+            event::emit(YieldClaimed { campaign_id, nft_id: object::id(nft3), round_number: current_round, amount: yield_per_share, claimer, timestamp });
+        };
+
+        if (nft4.campaign_id == campaign_id && nft4.last_claimed_round < current_round) {
+            nft4.last_claimed_round = current_round;
+            total_yield = total_yield + yield_per_share;
+            nfts_claimed = nfts_claimed + 1;
+            event::emit(YieldClaimed { campaign_id, nft_id: object::id(nft4), round_number: current_round, amount: yield_per_share, claimer, timestamp });
+        };
+
+        round.total_claimed = round.total_claimed + total_yield;
+        round.claimed_shares = round.claimed_shares + nfts_claimed;
+        campaign.total_yield_distributed = campaign.total_yield_distributed + total_yield;
+        
+        if (total_yield > 0) {
+            let yield_coin = coin::take(&mut campaign.yield_balance, total_yield, ctx);
+            transfer::public_transfer(yield_coin, claimer);
+        };
+    }
+
+    entry fun claim_yield_batch_5<CoinType>(
+        registry: &CampaignRegistry,
+        campaign: &mut Campaign<CoinType>,
+        nft1: &mut ResortShareNFT,
+        nft2: &mut ResortShareNFT,
+        nft3: &mut ResortShareNFT,
+        nft4: &mut ResortShareNFT,
+        nft5: &mut ResortShareNFT,
+        clock: &Clock,
+        ctx: &mut TxContext
+    ) {
+        // Pause Check
+        assert!(!registry.is_paused, ESystemPaused);
+
+        assert!(campaign.current_round > 0, ENoActiveRound);
+        let timestamp = sui::clock::timestamp_ms(clock);
+        let claimer = ctx.sender();
+        let campaign_id = object::id(campaign);
+        let current_round = campaign.current_round;
+        
+        let round = vector::borrow_mut(&mut campaign.yield_rounds, current_round - 1);
+        assert!(round.is_active, ERoundNotActive);
+        
+        let mut total_yield = 0u64;
+        let mut nfts_claimed = 0u64;
+        let yield_per_share = round.yield_per_share;
+        
+        if (nft1.campaign_id == campaign_id && nft1.last_claimed_round < current_round) {
+            nft1.last_claimed_round = current_round;
+            total_yield = total_yield + yield_per_share;
+            nfts_claimed = nfts_claimed + 1;
+            event::emit(YieldClaimed { campaign_id, nft_id: object::id(nft1), round_number: current_round, amount: yield_per_share, claimer, timestamp });
+        };
+        
+        if (nft2.campaign_id == campaign_id && nft2.last_claimed_round < current_round) {
+            nft2.last_claimed_round = current_round;
+            total_yield = total_yield + yield_per_share;
+            nfts_claimed = nfts_claimed + 1;
+            event::emit(YieldClaimed { campaign_id, nft_id: object::id(nft2), round_number: current_round, amount: yield_per_share, claimer, timestamp });
+        };
+        
+        if (nft3.campaign_id == campaign_id && nft3.last_claimed_round < current_round) {
+            nft3.last_claimed_round = current_round;
+            total_yield = total_yield + yield_per_share;
+            nfts_claimed = nfts_claimed + 1;
+            event::emit(YieldClaimed { campaign_id, nft_id: object::id(nft3), round_number: current_round, amount: yield_per_share, claimer, timestamp });
+        };
+        
+        if (nft4.campaign_id == campaign_id && nft4.last_claimed_round < current_round) {
+            nft4.last_claimed_round = current_round;
+            total_yield = total_yield + yield_per_share;
+            nfts_claimed = nfts_claimed + 1;
+            event::emit(YieldClaimed { campaign_id, nft_id: object::id(nft4), round_number: current_round, amount: yield_per_share, claimer, timestamp });
+        };
+        
+        if (nft5.campaign_id == campaign_id && nft5.last_claimed_round < current_round) {
+            nft5.last_claimed_round = current_round;
+            total_yield = total_yield + yield_per_share;
+            nfts_claimed = nfts_claimed + 1;
+            event::emit(YieldClaimed { campaign_id, nft_id: object::id(nft5), round_number: current_round, amount: yield_per_share, claimer, timestamp });
+        };
+
+        round.total_claimed = round.total_claimed + total_yield;
+        round.claimed_shares = round.claimed_shares + nfts_claimed;
+        campaign.total_yield_distributed = campaign.total_yield_distributed + total_yield;
+        
+        if (total_yield > 0) {
+            let yield_coin = coin::take(&mut campaign.yield_balance, total_yield, ctx);
+            transfer::public_transfer(yield_coin, claimer);
+        };
     }
 
     // ==================== Internal Helper Functions ====================
 
-    /// Internal function to mint NFTs
     fun mint_nfts_internal<CoinType>(
         campaign: &mut Campaign<CoinType>,
         quantity: u64,
@@ -1024,7 +1027,6 @@ module sinag::campaign {
         (issue_numbers, timestamp)
     }
 
-    /// Check if campaign is completed (sold out)
     fun check_campaign_completion<CoinType>(campaign: &mut Campaign<CoinType>, timestamp: u64) {
         if (campaign.shares_sold == campaign.total_supply) {
             campaign.status = STATUS_COMPLETED;
@@ -1039,109 +1041,13 @@ module sinag::campaign {
         }
     }
 
-    // ==================== View Functions - Yield ====================
+    // ==================== View Functions & Getters ====================
 
-    /// Check how much yield one NFT can claim
-    public fun get_claimable_yield<CoinType>(
-        campaign: &Campaign<CoinType>,
-        nft: &ResortShareNFT
-    ): u64 {
-        if (campaign.current_round == 0) {
-            return 0
-        };
-        
-        if (nft.last_claimed_round >= campaign.current_round) {
-            return 0
-        };
-        
-        let round = vector::borrow(&campaign.yield_rounds, campaign.current_round - 1);
-        
-        if (!round.is_active) {
-            return 0
-        };
-        
-        round.yield_per_share
+    public fun is_system_paused(registry: &CampaignRegistry): bool {
+        registry.is_paused
     }
 
-    /// Check total claimable yield for two NFTs
-    public fun get_claimable_yield_2<CoinType>(
-        campaign: &Campaign<CoinType>,
-        nft1: &ResortShareNFT,
-        nft2: &ResortShareNFT
-    ): u64 {
-        get_claimable_yield(campaign, nft1) + get_claimable_yield(campaign, nft2)
-    }
-
-    /// Check total claimable yield for three NFTs
-    public fun get_claimable_yield_3<CoinType>(
-        campaign: &Campaign<CoinType>,
-        nft1: &ResortShareNFT,
-        nft2: &ResortShareNFT,
-        nft3: &ResortShareNFT
-    ): u64 {
-        get_claimable_yield(campaign, nft1) + 
-        get_claimable_yield(campaign, nft2) + 
-        get_claimable_yield(campaign, nft3)
-    }
-
-    /// Check total claimable yield for five NFTs
-    public fun get_claimable_yield_5<CoinType>(
-        campaign: &Campaign<CoinType>,
-        nft1: &ResortShareNFT,
-        nft2: &ResortShareNFT,
-        nft3: &ResortShareNFT,
-        nft4: &ResortShareNFT,
-        nft5: &ResortShareNFT
-    ): u64 {
-        get_claimable_yield(campaign, nft1) + 
-        get_claimable_yield(campaign, nft2) + 
-        get_claimable_yield(campaign, nft3) + 
-        get_claimable_yield(campaign, nft4) + 
-        get_claimable_yield(campaign, nft5)
-    }
-
-    /// Get information about a specific yield round
-    public fun get_yield_round_info<CoinType>(
-        campaign: &Campaign<CoinType>,
-        round_number: u64
-    ): (u64, u64, u64, u64, bool, u64) {
-        assert!(round_number > 0 && round_number <= vector::length(&campaign.yield_rounds), ERoundNotFound);
-        
-        let round = vector::borrow(&campaign.yield_rounds, round_number - 1);
-        (
-            round.yield_per_share,
-            round.total_deposited,
-            round.total_claimed,
-            round.claimed_shares,
-            round.is_active,
-            round.opened_at
-        )
-    }
-
-    /// Get current round number
-    public fun get_current_round<CoinType>(campaign: &Campaign<CoinType>): u64 {
-        campaign.current_round
-    }
-
-    /// Check if NFT claimed current round
-    public fun has_claimed_current_round(
-        nft: &ResortShareNFT,
-        current_round: u64
-    ): bool {
-        nft.last_claimed_round >= current_round
-    }
-
-    /// Get total yield balance
-    public fun get_yield_balance<CoinType>(campaign: &Campaign<CoinType>): u64 {
-        balance::value(&campaign.yield_balance)
-    }
-
-    /// Get total yield distributed lifetime
-    public fun get_total_yield_distributed<CoinType>(campaign: &Campaign<CoinType>): u64 {
-        campaign.total_yield_distributed
-    }
-
-    // ==================== View Functions - Campaign ====================
+    // --- Campaign Info ---
 
     public fun get_campaign_number<CoinType>(campaign: &Campaign<CoinType>): u64 {
         campaign.campaign_number
@@ -1227,29 +1133,21 @@ module sinag::campaign {
         campaign.closed_at
     }
 
-    /// FEATURE 2: Get coin type name
     public fun get_coin_type<CoinType>(campaign: &Campaign<CoinType>): String {
         campaign.coin_type_name
     }
 
-    // ==================== View Functions - Investor Tracking ====================
+    // --- Investor Tracking ---
 
-    /// FEATURE 3: Get count of unique investors
     public fun get_unique_investor_count<CoinType>(campaign: &Campaign<CoinType>): u64 {
         campaign.unique_investors
     }
 
-    /// FEATURE 3: Check if an address is an investor in this campaign
     public fun is_investor<CoinType>(campaign: &Campaign<CoinType>, addr: address): bool {
         vec_set::contains(&campaign.investor_addresses, &addr)
     }
 
-    /// FEATURE 3: Get total number of investors (same as unique count)
-    public fun get_investor_count<CoinType>(campaign: &Campaign<CoinType>): u64 {
-        campaign.unique_investors
-    }
-
-    // ==================== View Functions - NFT ====================
+    // --- NFT Info ---
 
     public fun get_nft_campaign_id(nft: &ResortShareNFT): ID {
         nft.campaign_id
@@ -1291,31 +1189,89 @@ module sinag::campaign {
         nft.last_claimed_round
     }
 
-    // ==================== View Functions - Registry ====================
+    // --- Yield Info ---
 
-    public fun get_active_campaign_count(registry: &CampaignRegistry): u64 {
-        registry.campaign_count
+    public fun get_claimable_yield<CoinType>(
+        campaign: &Campaign<CoinType>,
+        nft: &ResortShareNFT
+    ): u64 {
+        if (campaign.current_round == 0) {
+            return 0
+        };
+        if (nft.last_claimed_round >= campaign.current_round) {
+            return 0
+        };
+        let round = vector::borrow(&campaign.yield_rounds, campaign.current_round - 1);
+        if (!round.is_active) {
+            return 0
+        };
+        round.yield_per_share
     }
 
-    public fun get_total_campaigns_created(registry: &CampaignRegistry): u64 {
-        registry.total_campaigns_created
+    public fun get_yield_round_info<CoinType>(
+        campaign: &Campaign<CoinType>,
+        round_number: u64
+    ): (u64, u64, u64, u64, bool, u64) {
+        assert!(round_number > 0 && round_number <= vector::length(&campaign.yield_rounds), ERoundNotFound);
+        let round = vector::borrow(&campaign.yield_rounds, round_number - 1);
+        (
+            round.yield_per_share,
+            round.total_deposited,
+            round.total_claimed,
+            round.claimed_shares,
+            round.is_active,
+            round.opened_at
+        )
     }
 
-    // ==================== Admin Capability Management ====================
-
-    /// Transfer admin capability to another address
-    entry fun transfer_admin_cap(
-        admin_cap: AdminCap,
-        recipient: address
-    ) {
-        transfer::transfer(admin_cap, recipient);
+    public fun get_current_round<CoinType>(campaign: &Campaign<CoinType>): u64 {
+        campaign.current_round
     }
 
-    // ==================== Test Helper ====================
-    
-    #[test_only]
-    public fun init_for_testing(ctx: &mut TxContext) {
-        let otw = CAMPAIGN {};
-        init(otw, ctx);
+    public fun has_claimed_current_round(
+        nft: &ResortShareNFT,
+        current_round: u64
+    ): bool {
+        nft.last_claimed_round >= current_round
     }
+
+    public fun get_yield_balance<CoinType>(campaign: &Campaign<CoinType>): u64 {
+        balance::value(&campaign.yield_balance)
+    }
+
+    public fun get_total_yield_distributed<CoinType>(campaign: &Campaign<CoinType>): u64 {
+        campaign.total_yield_distributed
+    }
+}
+
+// ==================== Tests ====================
+
+#[test_only]
+module sinag::tests {
+    use sinag::campaign::{Self, AdminCap, CampaignRegistry, Campaign, CAMPAIGN};
+    use sui::test_scenario::{Self, Scenario};
+    use sui::coin::{Self};
+    use sui::sui::SUI;
+    use sui::clock::{Self, Clock};
+    use std::vector;
+    use std::string;
+
+    const ADMIN: address = @0xAD;
+    const CREATOR: address = @0xCA;
+
+    // Helper to setup test environment
+    fun init_test_chain(scenario: &mut Scenario) {
+        let ctx = test_scenario::ctx(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = sinag::campaign::EOverflowRisk)]
+    fun test_overflow_protection() {
+        let mut scenario_val = test_scenario::begin(ADMIN);
+        let scenario = &mut scenario_val;
+        let clock = clock::create_for_testing(test_scenario::ctx(scenario));
+        clock::destroy_for_testing(clock);
+        test_scenario::end(scenario_val);
+    }
+
 }

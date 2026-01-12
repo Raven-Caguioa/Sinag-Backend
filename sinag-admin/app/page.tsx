@@ -3,7 +3,7 @@
 // app/page.tsx
 import { useEffect, useState } from "react";
 import { useSuiClient, useCurrentAccount } from "@mysten/dapp-kit";
-import { TrendingUp, DollarSign, Activity, Package } from "lucide-react";
+import { TrendingUp, DollarSign, Activity, Package, AlertTriangle } from "lucide-react";
 import { REGISTRY, ADMIN_CAP } from "@/lib/constants";
 import { formatNumber, shortenAddress } from "@/lib/utils";
 
@@ -14,6 +14,7 @@ export default function Dashboard() {
     totalCampaigns: 0,
     activeCampaigns: 0,
     isAdmin: false,
+    isPaused: false,
   });
   const [loading, setLoading] = useState(true);
 
@@ -38,6 +39,7 @@ export default function Dashboard() {
             totalCampaigns: parseInt(fields.total_campaigns_created || "0"),
             activeCampaigns: parseInt(fields.campaign_count || "0"),
             isAdmin: false,
+            isPaused: fields.is_paused === true || fields.is_paused === "true" || fields.is_paused === 1,
           });
         }
 
@@ -79,6 +81,21 @@ export default function Dashboard() {
           Welcome to Sinag Protocol Admin Panel
         </p>
       </div>
+
+      {/* Pause Banner */}
+      {stats.isPaused && (
+        <div className="p-4 rounded-xl bg-red-50 dark:bg-red-900/20 border-2 border-red-200 dark:border-red-800/30 flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm font-semibold text-red-700 dark:text-red-400 mb-1">
+              ⚠️ System is currently PAUSED
+            </p>
+            <p className="text-sm text-red-600 dark:text-red-500">
+              Minting and claiming are disabled. Administrative functions remain available.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Wallet Info */}
       {account ? (

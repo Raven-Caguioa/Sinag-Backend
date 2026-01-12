@@ -8,7 +8,8 @@ import { DollarSign, Loader2, CheckCircle, AlertCircle, Search, Wallet, Shield }
 import { 
   PACKAGE_ID,
   OLD_PACKAGE_ID, 
-  ADMIN_CAP, 
+  ADMIN_CAP,
+  REGISTRY,
   SUI_CLOCK,
   ERROR_MESSAGES 
 } from "@/lib/constants";
@@ -37,9 +38,6 @@ interface Campaign {
   closed_at: string | null;
 }
 
-// Project Treasury Wallet Address (hardcoded in Move contract)
-const TREASURY_ADDRESS = "0x7a3460760da4de7d58d480d676a1cff58376169df66acb6e6b6da6f0baa699ea";
-
 export default function WithdrawFunds() {
   const account = useCurrentAccount();
   const client = useSuiClient();
@@ -52,10 +50,30 @@ export default function WithdrawFunds() {
   const [txDigest, setTxDigest] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [searchTerm, setSearchTerm] = useState("");
+  const [treasuryAddress, setTreasuryAddress] = useState<string>("");
 
   useEffect(() => {
+    fetchTreasuryAddress();
     fetchFinalizedCampaigns();
   }, [account]);
+
+  const fetchTreasuryAddress = async () => {
+    if (!account) return;
+
+    try {
+      const registryObject = await client.getObject({
+        id: REGISTRY,
+        options: { showContent: true },
+      });
+
+      if (registryObject.data?.content?.dataType === "moveObject") {
+        const fields = registryObject.data.content.fields as any;
+        setTreasuryAddress(fields.treasury_address || "");
+      }
+    } catch (err) {
+      console.error("Error fetching treasury address:", err);
+    }
+  };
 
   const fetchFinalizedCampaigns = async () => {
     console.log("=== STARTING FETCH FOR WITHDRAWAL ===");
@@ -227,6 +245,7 @@ export default function WithdrawFunds() {
         target: `${PACKAGE_ID}::campaign::withdraw_funds`,
         arguments: [
           tx.object(ADMIN_CAP),
+          tx.object(REGISTRY),
           tx.object(selectedCampaign),
           tx.object(SUI_CLOCK),
         ],
@@ -302,10 +321,10 @@ export default function WithdrawFunds() {
           </div>
           <div className="flex-1">
             <p className="text-xs text-slate-500 dark:text-slate-400 mb-1">
-              Destination: Project Treasury
+              Destination: {treasuryAddress ? "Project Treasury" : "Loading..."}
             </p>
             <p className="font-mono text-sm text-slate-900 dark:text-white break-all">
-              {shortenAddress(TREASURY_ADDRESS, 8)}
+              {treasuryAddress ? shortenAddress(treasuryAddress, 8) : "—"}
             </p>
           </div>
           <div className="px-2 py-1 rounded-full bg-green-100 dark:bg-green-900/30 border border-green-200 dark:border-green-800/50">
@@ -448,7 +467,7 @@ export default function WithdrawFunds() {
             <div className="flex justify-between items-center">
               <span className="text-sm text-green-700 dark:text-green-400">Recipient</span>
               <span className="text-sm font-mono text-green-900 dark:text-green-100">
-                {shortenAddress(TREASURY_ADDRESS, 6)}
+                {treasuryAddress ? shortenAddress(treasuryAddress, 6) : "—"}
               </span>
             </div>
           </div>

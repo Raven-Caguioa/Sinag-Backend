@@ -4,10 +4,11 @@
 import { useState, useEffect } from "react";
 import { useSignAndExecuteTransaction, useCurrentAccount, useSuiClient } from "@mysten/dapp-kit";
 import { Transaction } from "@mysten/sui/transactions";
-import { Lock, Loader2, CheckCircle, AlertCircle, Search, TrendingDown } from "lucide-react";
+import { Lock, Loader2, CheckCircle, AlertCircle, Search, TrendingDown, RefreshCw } from "lucide-react";
 import { 
   PACKAGE_ID,
-  ADMIN_CAP, 
+  ADMIN_CAP,
+  REGISTRY,
   SUI_CLOCK,
   ERROR_MESSAGES 
 } from "@/lib/constants";
@@ -31,6 +32,8 @@ interface YieldRound {
   claimed_shares: string;
   is_active: boolean;
   opened_at: string;
+  closed_at?: string | null;
+  yield_withdrawn?: boolean;
 }
 
 interface Campaign {
@@ -45,6 +48,17 @@ interface Campaign {
   created_at: string;
 }
 
+interface RecoverableRound {
+  campaignId: string;
+  campaignName: string;
+  campaignLocation: string;
+  coin_type: "SUI" | "USDC";
+  round_number: number;
+  total_deposited: string;
+  total_claimed: string;
+  unclaimed_amount: string;
+}
+
 export default function CloseYieldRound() {
   const account = useCurrentAccount();
   const client = useSuiClient();
@@ -57,9 +71,13 @@ export default function CloseYieldRound() {
   const [txDigest, setTxDigest] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [searchTerm, setSearchTerm] = useState("");
+  const [recoverableRounds, setRecoverableRounds] = useState<RecoverableRound[]>([]);
+  const [loadingRecovery, setLoadingRecovery] = useState(false);
+  const [recoveringRound, setRecoveringRound] = useState<string>(""); // campaignId-roundNumber
 
   useEffect(() => {
     fetchCampaignsWithActiveRounds();
+    fetchRecoverableRounds();
   }, [account]);
 
   const fetchCampaignsWithActiveRounds = async () => {
@@ -276,6 +294,144 @@ export default function CloseYieldRound() {
       console.error("Error closing yield round:", err);
       setError(err.message || ERROR_MESSAGES.TRANSACTION_FAILED);
       setLoading(false);
+    }
+  };
+
+  const fetchRecoverableRounds = async () => {
+    if (!account) return;
+
+    try {
+      // Query closed yield rounds
+      const closedEvents = await client.queryEvents({
+        query: { MoveEventType: `${PACKAGE_ID}::campaign::YieldRoundClosed` },
+        order: 'descending',
+      });
+
+      // Query claimed events to calculate total claimed
+      const claimedEvents = await client.queryEvents({
+        query: { MoveEventType: `${PACKAGE_ID}::campaign::YieldClaimed` },
+        order: 'descending',
+      });
+
+      // Aggregate claims per round
+      const claimStats = new Map<string, bigint>();
+      claimedEvents.data.forEach((e) => {
+        const data = e.parsedJson as any;
+        const key = `${data?.campaign_id}-${data?.round_number}`;
+        const amount = BigInt(data?.amount || "0");
+        claimStats.set(key, (claimStats.get(key) || 0n) + amount);
+      });
+
+      // Build recoverable rounds list
+      const recoverable: RecoverableRound[] = [];
+
+      for (const event of closedEvents.data) {
+        const data = event.parsedJson as any;
+        const campaignId = data?.campaign_id;
+        const roundNumber = parseInt(data?.round_number || "0");
+        const totalDeposited = BigInt(data?.total_deposited || "0");
+        const key = `${campaignId}-${roundNumber}`;
+        const totalClaimed = claimStats.get(key) || 0n;
+
+        // Check if there's unclaimed yield
+        if (totalDeposited > totalClaimed) {
+          // Fetch campaign details
+          try {
+            const campaignObj = await client.getObject({
+              id: campaignId,
+              options: { showContent: true, showType: true },
+            });
+
+            if (campaignObj.data?.content?.dataType === "moveObject") {
+              const fields = campaignObj.data.content.fields as any;
+              const coinType = campaignObj.data.type?.includes("SUI") ? "SUI" : "USDC";
+              const unclaimedAmount = (totalDeposited - totalClaimed).toString();
+
+              recoverable.push({
+                campaignId,
+                campaignName: fields.name || "Unknown Campaign",
+                campaignLocation: fields.location || "Unknown",
+                coin_type: coinType,
+                round_number: roundNumber,
+                total_deposited: totalDeposited.toString(),
+                total_claimed: totalClaimed.toString(),
+                unclaimed_amount: unclaimedAmount,
+              });
+            }
+          } catch (err) {
+            console.error(`Error fetching campaign ${campaignId}:`, err);
+          }
+        }
+      }
+
+      setRecoverableRounds(recoverable);
+    } catch (err) {
+      console.error("Error fetching recoverable rounds:", err);
+    }
+  };
+
+  const handleRecoverUnclaimedYield = async (round: RecoverableRound) => {
+    if (!account) {
+      setError(ERROR_MESSAGES.NO_WALLET);
+      return;
+    }
+
+    const recoveryKey = `${round.campaignId}-${round.round_number}`;
+    setRecoveringRound(recoveryKey);
+    setError("");
+    setTxDigest("");
+
+    try {
+      const tx = new Transaction();
+
+      const typeArg = round.coin_type === "SUI"
+        ? "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI"
+        : "0xa1ec7fc00a6f40db9693ad1415d0c193ad3906494428cf252621037bd7117e29::usdc::USDC";
+
+      tx.moveCall({
+        target: `${PACKAGE_ID}::campaign::withdraw_unclaimed_yield`,
+        arguments: [
+          tx.object(ADMIN_CAP),
+          tx.object(REGISTRY),
+          tx.object(round.campaignId),
+          tx.pure.u64(round.round_number),
+          tx.object(SUI_CLOCK),
+        ],
+        typeArguments: [typeArg],
+      });
+
+      signAndExecute(
+        {
+          transaction: tx,
+        },
+        {
+          onSuccess: async (result) => {
+            setTxDigest(result.digest);
+            
+            try {
+              await waitForTransaction(client, result.digest);
+              alert(`Successfully recovered unclaimed yield from Round #${round.round_number}!`);
+              await fetchRecoverableRounds();
+              setRecoveringRound("");
+            } catch (confirmError) {
+              console.error("Confirmation error:", confirmError);
+            }
+            
+            setLoadingRecovery(false);
+          },
+          onError: (error) => {
+            console.error("Transaction error:", error);
+            setError(error.message || ERROR_MESSAGES.TRANSACTION_FAILED);
+            setLoadingRecovery(false);
+            setRecoveringRound("");
+          },
+        }
+      );
+    } catch (err: any) {
+      console.error("Error recovering unclaimed yield:", err);
+      setError(err.message || ERROR_MESSAGES.TRANSACTION_FAILED);
+      setLoadingRecovery(false);
+      setRecoveringRound("");
     }
   };
 
@@ -498,6 +654,113 @@ export default function CloseYieldRound() {
           You can open a new round anytime to distribute more yield to NFT holders.
         </p>
       </div>
+
+      {/* Unclaimed Yield Recovery Section */}
+      {recoverableRounds.length > 0 && (
+        <div className="mt-8 space-y-4">
+          <div>
+            <h2 className="text-2xl font-medium tracking-tight text-slate-900 dark:text-white mb-2">
+              Unclaimed Yield Recovery
+            </h2>
+            <p className="text-slate-500 dark:text-slate-400">
+              Recover unclaimed yield from closed rounds
+            </p>
+          </div>
+
+          <div className="p-4 rounded-xl bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/30">
+            <p className="text-sm text-blue-700 dark:text-blue-400">
+              <strong>Note:</strong> These rounds have been closed but still contain unclaimed yield. 
+              You can recover this yield to the treasury.
+            </p>
+          </div>
+
+          <div className="space-y-3">
+            {recoverableRounds.map((round) => {
+              const unclaimedAmount = round.coin_type === "SUI"
+                ? mistToSui(round.unclaimed_amount)
+                : microToUsdc(round.unclaimed_amount);
+              const recoveryKey = `${round.campaignId}-${round.round_number}`;
+              const isRecovering = recoveringRound === recoveryKey;
+
+              return (
+                <div
+                  key={recoveryKey}
+                  className="p-5 rounded-xl bg-slate-50 dark:bg-[#0a0a0a] border border-slate-200 dark:border-white/10"
+                >
+                  <div className="flex items-start justify-between mb-3">
+                    <div>
+                      <h3 className="text-lg font-semibold text-slate-900 dark:text-white mb-1">
+                        {round.campaignName}
+                      </h3>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">
+                        {round.campaignLocation} • Round #{round.round_number}
+                      </p>
+                    </div>
+                    <span className="px-3 py-1 rounded-full text-xs font-semibold bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                      {round.coin_type}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-4 mb-4">
+                    <div>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mb-1">
+                        Total Deposited
+                      </p>
+                      <p className="text-sm font-semibold text-slate-900 dark:text-white">
+                        {formatCurrency(
+                          round.coin_type === "SUI"
+                            ? mistToSui(round.total_deposited)
+                            : microToUsdc(round.total_deposited),
+                          round.coin_type
+                        )}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mb-1">
+                        Total Claimed
+                      </p>
+                      <p className="text-sm font-semibold text-slate-900 dark:text-white">
+                        {formatCurrency(
+                          round.coin_type === "SUI"
+                            ? mistToSui(round.total_claimed)
+                            : microToUsdc(round.total_claimed),
+                          round.coin_type
+                        )}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mb-1">
+                        Unclaimed Amount
+                      </p>
+                      <p className="text-lg font-bold text-red-600 dark:text-red-400">
+                        {formatCurrency(unclaimedAmount, round.coin_type)}
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => handleRecoverUnclaimedYield(round)}
+                    disabled={isRecovering || !account}
+                    className="w-full py-2 rounded-lg bg-red-600 dark:bg-red-500 text-white font-semibold hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
+                  >
+                    {isRecovering ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Recovering...
+                      </>
+                    ) : (
+                      <>
+                        <RefreshCw className="w-4 h-4" />
+                        Recover Unclaimed Yield
+                      </>
+                    )}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

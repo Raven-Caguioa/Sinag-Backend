@@ -39,6 +39,15 @@ export interface YieldRound {
   is_active: boolean;
   opened_at: string;
   closed_at: string | null;
+  yield_withdrawn: boolean; // NEW: Track if unclaimed yield has been recovered
+}
+
+export interface CampaignRegistry {
+  id: string;
+  campaign_count: string;
+  total_campaigns_created: string;
+  treasury_address: string; // NEW: Dynamic treasury address
+  is_paused: boolean;       // NEW: System pause status
 }
 
 export interface ResortShareNFT {

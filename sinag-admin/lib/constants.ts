@@ -2,19 +2,19 @@
 // Sinag Protocol Contract Configuration
 
 // ============ PACKAGE IDs ============
-// NEW package from your recent deployment
-export const PACKAGE_ID = "0x745d9b84dd990aed04c0a2202b8d34fa3c74f7e2ca708543425bfe66d4160fbf";
+// NEW package from your recent deployment (0x9c43...)
+export const PACKAGE_ID = "0x9c432006d3068f23371320f64c6f2eb3db8b2624c0cbb155eb2274b012eeab8a";
 
-// OLD package (kept for backward compatibility)
-export const OLD_PACKAGE_ID = "0x6d9a0ac9f9741f5e578a4e874010760ab2da7d558b7c4115174c631ee694b48e";
+// OLD package (The previous active package 0x745d...)
+export const OLD_PACKAGE_ID = "0x745d9b84dd990aed04c0a2202b8d34fa3c74f7e2ca708543425bfe66d4160fbf";
 
 // ============ CORE OBJECT IDs ============
 // Extracted from your provided transaction data
-export const ADMIN_CAP = "0xaeab2fea6294dfe40b49ea495f6b8a68437a30a14e4bc294360698aaaf54e223";
-export const REGISTRY = "0x13f96f72dc265e5866face23d415fac6beb9c9703e0d2a35c22f668b93c97673";
-export const DISPLAY = "0x14d07415fba0aca3b4ef401a73ee7bf05c07abfdedaa62d85e664ef0995ce1b1";
-export const PUBLISHER = "0xeded6c4b6a1725fab23d5b0478dd19908d96fe29923700509f0868ed18ddeea8";
-export const UPGRADE_CAP = "0xbcc19fc4780a49d35672cc6774e1f9475cf8652e4ae8493250cd1ba3bde7698a";
+export const ADMIN_CAP = "0x5c71c1bf7a0f396049da2227536ee015e9a57a2ac3d42609326b1a8190ea1fb3";
+export const REGISTRY = "0x1953836ed6f9358e9af05f656f7319549c5f2e37eaa9ccf3340660a90dfe6b90";
+export const DISPLAY = "0x9d5b4a06a2afcdbbfeabe3ddaf0cfa363632fa248b992c00caed5f13fe26e197";
+export const PUBLISHER = "0xb45c8ba094d73125949f5505510e37fe3cf996a2d9308b80be772bae1df4f85e";
+export const UPGRADE_CAP = "0x1e4432f319329a8ae870639fe61c33ec59e984a00a5cdb65be4fc65a80fb29f0";
 
 // ============ OBJECT TYPES ============
 export const CAMPAIGN_TYPE_SUI = `${PACKAGE_ID}::campaign::Campaign<0x2::sui::SUI>`;
