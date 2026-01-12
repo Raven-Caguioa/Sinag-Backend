@@ -2,18 +2,19 @@
 // Sinag Protocol Contract Configuration
 
 // ============ PACKAGE IDs ============
-// NEW package with yield distribution, coin type field, and investor tracking
-export const PACKAGE_ID = "0x231694a62e54c1526a98cad24ad43eb6bcf8cf4326e30437e454e10498d15a79";
+// NEW package from your recent deployment
+export const PACKAGE_ID = "0x745d9b84dd990aed04c0a2202b8d34fa3c74f7e2ca708543425bfe66d4160fbf";
 
-// OLD package (still valid for existing campaigns, but no new features)
+// OLD package (kept for backward compatibility)
 export const OLD_PACKAGE_ID = "0x6d9a0ac9f9741f5e578a4e874010760ab2da7d558b7c4115174c631ee694b48e";
 
 // ============ CORE OBJECT IDs ============
-export const ADMIN_CAP = "0x297d4b9c13e11e59741b61ce8da319443eaa0257b5464941f8e53de7366ecb04";
-export const REGISTRY = "0xb369681e3f2d933dbc5ccad2e854fa562884f6df258e5a2aa5fcb85dad373fc6";
-export const DISPLAY = "0x640d639a3960b746dd3681cf96db7dbff0a5704870eafcdb56d976127ad6ea17";
-export const PUBLISHER = "0xc041899956ebabf7bca6a911c0076b5a0494013801499020a0f72a68d03e07cd";
-export const UPGRADE_CAP = "0x47f2949eaefd0bc01b1e2737b8e9883ba94a5fa63ebc2c38812a9d4f95520a54";
+// Extracted from your provided transaction data
+export const ADMIN_CAP = "0xaeab2fea6294dfe40b49ea495f6b8a68437a30a14e4bc294360698aaaf54e223";
+export const REGISTRY = "0x13f96f72dc265e5866face23d415fac6beb9c9703e0d2a35c22f668b93c97673";
+export const DISPLAY = "0x14d07415fba0aca3b4ef401a73ee7bf05c07abfdedaa62d85e664ef0995ce1b1";
+export const PUBLISHER = "0xeded6c4b6a1725fab23d5b0478dd19908d96fe29923700509f0868ed18ddeea8";
+export const UPGRADE_CAP = "0xbcc19fc4780a49d35672cc6774e1f9475cf8652e4ae8493250cd1ba3bde7698a";
 
 // ============ OBJECT TYPES ============
 export const CAMPAIGN_TYPE_SUI = `${PACKAGE_ID}::campaign::Campaign<0x2::sui::SUI>`;

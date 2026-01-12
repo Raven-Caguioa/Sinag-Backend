@@ -4,7 +4,7 @@
 import { useState, useEffect } from "react";
 import { useSignAndExecuteTransaction, useCurrentAccount, useSuiClient } from "@mysten/dapp-kit";
 import { Transaction } from "@mysten/sui/transactions";
-import { DollarSign, Loader2, CheckCircle, AlertCircle, Search, Wallet } from "lucide-react";
+import { DollarSign, Loader2, CheckCircle, AlertCircle, Search, Wallet, Shield } from "lucide-react";
 import { 
   PACKAGE_ID,
   OLD_PACKAGE_ID, 
@@ -36,6 +36,9 @@ interface Campaign {
   created_at: string;
   closed_at: string | null;
 }
+
+// Project Treasury Wallet Address (hardcoded in Move contract)
+const TREASURY_ADDRESS = "0x7a3460760da4de7d58d480d676a1cff58376169df66acb6e6b6da6f0baa699ea";
 
 export default function WithdrawFunds() {
   const account = useCurrentAccount();
@@ -288,27 +291,30 @@ export default function WithdrawFunds() {
           Withdraw Funds
         </h1>
         <p className="text-slate-500 dark:text-slate-400">
-          Withdraw funds from finalized campaigns to your wallet
+          Withdraw funds from finalized campaigns to the Project Treasury Wallet
         </p>
       </div>
 
-      {account && (
-        <div className="p-4 rounded-xl bg-gradient-to-r from-blue-50 to-purple-50 dark:from-blue-900/20 dark:to-purple-900/20 border border-blue-200 dark:border-blue-800/30">
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-white dark:bg-[#111]">
-              <Wallet className="w-5 h-5 text-blue-600 dark:text-[#D4AF37]" />
-            </div>
-            <div>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                Withdrawal Recipient
-              </p>
-              <p className="font-mono text-sm text-slate-900 dark:text-white">
-                {shortenAddress(account.address, 8)}
-              </p>
-            </div>
+      <div className="p-4 rounded-xl bg-gradient-to-r from-blue-50 to-purple-50 dark:from-blue-900/20 dark:to-purple-900/20 border border-blue-200 dark:border-blue-800/30">
+        <div className="flex items-center gap-3">
+          <div className="p-2 rounded-lg bg-white dark:bg-[#111]">
+            <Shield className="w-5 h-5 text-blue-600 dark:text-[#D4AF37]" />
+          </div>
+          <div className="flex-1">
+            <p className="text-xs text-slate-500 dark:text-slate-400 mb-1">
+              Destination: Project Treasury
+            </p>
+            <p className="font-mono text-sm text-slate-900 dark:text-white break-all">
+              {shortenAddress(TREASURY_ADDRESS, 8)}
+            </p>
+          </div>
+          <div className="px-2 py-1 rounded-full bg-green-100 dark:bg-green-900/30 border border-green-200 dark:border-green-800/50">
+            <span className="text-xs font-semibold text-green-700 dark:text-green-400">
+              Secure
+            </span>
           </div>
         </div>
-      )}
+      </div>
 
       <div className="relative">
         <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
@@ -442,7 +448,7 @@ export default function WithdrawFunds() {
             <div className="flex justify-between items-center">
               <span className="text-sm text-green-700 dark:text-green-400">Recipient</span>
               <span className="text-sm font-mono text-green-900 dark:text-green-100">
-                {account && shortenAddress(account.address, 6)}
+                {shortenAddress(TREASURY_ADDRESS, 6)}
               </span>
             </div>
           </div>
@@ -497,8 +503,9 @@ export default function WithdrawFunds() {
 
       <div className="p-4 rounded-xl bg-slate-50 dark:bg-[#0a0a0a] border border-slate-200 dark:border-white/5">
         <p className="text-sm text-slate-600 dark:text-slate-400">
-          <strong>Note:</strong> Funds will be transferred directly to your connected wallet address. 
-          Make sure you're using the correct wallet before withdrawing.
+          <strong>Note:</strong> Funds are programmatically transferred to the Project Treasury Wallet. 
+          Your connected wallet is only used to sign the transaction (for gas fees). The destination address 
+          is hardcoded in the smart contract for security.
         </p>
       </div>
     </div>

@@ -4,7 +4,7 @@
 import { FC, ReactNode, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ConnectButton } from "@mysten/dapp-kit";
+import { ConnectButton, useCurrentAccount } from "@mysten/dapp-kit";
 import { 
   Sun, 
   Moon, 
@@ -17,8 +17,11 @@ import {
   X,
   TrendingUp,
   BarChart3,
-  Lock
+  Lock,
+  AlertTriangle,
+  Shield
 } from "lucide-react";
+import { isAdmin } from "@/lib/admins";
 
 interface AdminLayoutProps {
   children: ReactNode;
@@ -26,6 +29,7 @@ interface AdminLayoutProps {
 
 export const AdminLayout: FC<AdminLayoutProps> = ({ children }) => {
   const pathname = usePathname();
+  const account = useCurrentAccount();
   const [darkMode, setDarkMode] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -33,6 +37,12 @@ export const AdminLayout: FC<AdminLayoutProps> = ({ children }) => {
     setDarkMode(!darkMode);
     document.documentElement.classList.toggle("dark");
   };
+
+  // Check if wallet is connected
+  const isConnected = !!account;
+  
+  // Check if connected address is an admin
+  const isAuthorized = isAdmin(account?.address);
 
   const navItems = [
     { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -45,6 +55,88 @@ export const AdminLayout: FC<AdminLayoutProps> = ({ children }) => {
     { href: "/yield-statistics", label: "Yield Statistics", icon: BarChart3 }, 
   ];
 
+  // Show connect wallet screen if not connected
+  if (!isConnected) {
+    return (
+      <div className={darkMode ? "dark" : ""}>
+        <div className="min-h-screen bg-white dark:bg-[#050505] text-slate-900 dark:text-slate-300 transition-colors duration-300 flex items-center justify-center">
+          <div className="text-center space-y-6 p-8">
+            <div className="w-20 h-20 mx-auto rounded-full bg-slate-900 dark:bg-[#D4AF37] flex items-center justify-center">
+              <Shield className="w-10 h-10 text-white dark:text-black" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-semibold text-slate-900 dark:text-white mb-2">
+                Connect Your Wallet
+              </h1>
+              <p className="text-slate-500 dark:text-slate-400 mb-6">
+                Please connect your Sui wallet to access the admin dashboard
+              </p>
+              <div className="flex justify-center">
+                <ConnectButton />
+              </div>
+            </div>
+            <div className="flex items-center justify-center gap-3 pt-4">
+              <button
+                onClick={toggleDarkMode}
+                className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-white/10 transition-colors"
+              >
+                {darkMode ? (
+                  <Sun className="w-5 h-5 text-[#D4AF37]" />
+                ) : (
+                  <Moon className="w-5 h-5 text-slate-600" />
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Show access denied screen if connected but not an admin
+  if (!isAuthorized) {
+    return (
+      <div className={darkMode ? "dark" : ""}>
+        <div className="min-h-screen bg-white dark:bg-[#050505] text-slate-900 dark:text-slate-300 transition-colors duration-300 flex items-center justify-center">
+          <div className="text-center space-y-6 p-8 max-w-md">
+            <div className="w-20 h-20 mx-auto rounded-full bg-red-100 dark:bg-red-900/20 flex items-center justify-center">
+              <AlertTriangle className="w-10 h-10 text-red-600 dark:text-red-400" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-semibold text-slate-900 dark:text-white mb-2">
+                Access Denied
+              </h1>
+              <p className="text-slate-500 dark:text-slate-400 mb-4">
+                Your wallet address is not authorized to access this admin dashboard.
+              </p>
+              {account?.address && (
+                <div className="mt-4 p-4 rounded-lg bg-slate-50 dark:bg-[#0a0a0a] border border-slate-200 dark:border-white/5">
+                  <p className="text-xs text-slate-400 dark:text-slate-500 mb-1">Connected Address:</p>
+                  <p className="text-sm font-mono text-slate-600 dark:text-slate-400 break-all">
+                    {account.address}
+                  </p>
+                </div>
+              )}
+            </div>
+            <div className="flex items-center justify-center gap-3 pt-4">
+              <button
+                onClick={toggleDarkMode}
+                className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-white/10 transition-colors"
+              >
+                {darkMode ? (
+                  <Sun className="w-5 h-5 text-[#D4AF37]" />
+                ) : (
+                  <Moon className="w-5 h-5 text-slate-600" />
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Render the full admin dashboard for authorized admins
   return (
     <div className={darkMode ? "dark" : ""}>
       <div className="min-h-screen bg-white dark:bg-[#050505] text-slate-900 dark:text-slate-300 transition-colors duration-300">

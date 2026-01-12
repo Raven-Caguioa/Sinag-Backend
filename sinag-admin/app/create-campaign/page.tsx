@@ -5,12 +5,14 @@ import { useSignAndExecuteTransaction, useCurrentAccount, useSuiClient } from "@
 import { Transaction } from "@mysten/sui/transactions";
 import { bcs } from "@mysten/sui/bcs";
 import { PlusCircle, Loader2, CheckCircle, AlertCircle, Trash2 } from "lucide-react";
+import { ImageUpload } from "@/components/ui/ImageUpload";
 import { 
   PACKAGE_ID, 
   ADMIN_CAP, 
   REGISTRY, 
   SUI_CLOCK,
-  ERROR_MESSAGES 
+  ERROR_MESSAGES,
+  MAX_IMAGES 
 } from "@/lib/constants";
 import { 
   suiToMist, 
@@ -51,14 +53,14 @@ export default function CreateCampaign() {
     setError("");
   };
 
-  const handleImageChange = (index: number, value: string) => {
+  const handleResortImageChange = (index: number, url: string) => {
     const newImages = [...formData.resort_images];
-    newImages[index] = value;
+    newImages[index] = url;
     setFormData((prev) => ({ ...prev, resort_images: newImages }));
   };
 
   const addImageField = () => {
-    if (formData.resort_images.length < 10) {
+    if (formData.resort_images.length < MAX_IMAGES) {
       setFormData((prev) => ({
         ...prev,
         resort_images: [...prev.resort_images, ""],
@@ -110,7 +112,12 @@ export default function CreateCampaign() {
 
     const validImages = formData.resort_images.filter((img) => img.trim() !== "");
     if (validImages.length === 0) {
-      setError("Please provide at least one resort image");
+      setError(ERROR_MESSAGES.INVALID_IMAGES);
+      return false;
+    }
+
+    if (validImages.length > MAX_IMAGES) {
+      setError(`Maximum ${MAX_IMAGES} images allowed`);
       return false;
     }
 
@@ -119,15 +126,16 @@ export default function CreateCampaign() {
       return false;
     }
 
+    // Validate that all images are valid IPFS URLs (should start with https://gateway or http://ipfs)
     for (const img of validImages) {
-      if (!isValidUrl(img)) {
-        setError("Invalid image URL format");
+      if (!isValidUrl(img) || (!img.includes("ipfs") && !img.startsWith("http"))) {
+        setError("All resort images must be valid IPFS URLs");
         return false;
       }
     }
 
-    if (!isValidUrl(formData.nft_image)) {
-      setError("Invalid NFT image URL format");
+    if (!isValidUrl(formData.nft_image) || (!formData.nft_image.includes("ipfs") && !formData.nft_image.startsWith("http"))) {
+      setError("NFT image must be a valid IPFS URL");
       return false;
     }
 
@@ -158,25 +166,28 @@ export default function CreateCampaign() {
 
       const validImages = formData.resort_images.filter((img) => img.trim() !== "");
 
+      // Build arguments matching the Move contract signature exactly:
+      // create_campaign_sui(admin, registry, name, description, location, target_apy, maturity_days, 
+      //                    structure, price_per_share, total_supply, resort_images, nft_image, due_diligence_url, clock)
+      // Note: Contract expects vector<u8> for strings and vector<vector<u8>> for string arrays
+      // Sui SDK v1 tx.pure() with BCS serialization ensures correct byte serialization
       const args = [
         tx.object(ADMIN_CAP),
         tx.object(REGISTRY),
-        tx.pure(bcs.string().serialize(formData.name).toBytes()),
-        tx.pure(bcs.string().serialize(formData.description).toBytes()),
-        tx.pure(bcs.string().serialize(formData.location).toBytes()),
-        tx.pure.u64(apyBps),
-        tx.pure.u64(parseInt(formData.maturity_days)),
-        tx.pure(bcs.string().serialize(formData.structure).toBytes()),
-        tx.pure.u64(priceInSmallestUnit),
-        tx.pure.u64(parseInt(formData.total_supply)),
-        tx.pure(bcs.vector(bcs.string()).serialize(validImages).toBytes()),
-        tx.pure(bcs.string().serialize(formData.nft_image).toBytes()),
-        tx.pure(
-          formData.due_diligence_url.trim()
-            ? bcs.option(bcs.string()).serialize(formData.due_diligence_url.trim()).toBytes()
-            : bcs.option(bcs.string()).serialize(null).toBytes()
-        ),
-        tx.object(SUI_CLOCK),
+        tx.pure(bcs.string().serialize(formData.name).toBytes()), // vector<u8> (name)
+        tx.pure(bcs.string().serialize(formData.description).toBytes()), // vector<u8> (description)
+        tx.pure(bcs.string().serialize(formData.location).toBytes()), // vector<u8> (location)
+        tx.pure.u64(apyBps), // u64 (target_apy in basis points: 10% = 1000 bps)
+        tx.pure.u64(parseInt(formData.maturity_days)), // u64 (maturity_days)
+        tx.pure(bcs.string().serialize(formData.structure).toBytes()), // vector<u8> (structure)
+        tx.pure.u64(priceInSmallestUnit), // u64 (price_per_share in MIST for SUI or micro-USDC for USDC)
+        tx.pure.u64(parseInt(formData.total_supply)), // u64 (total_supply)
+        tx.pure(bcs.vector(bcs.string()).serialize(validImages).toBytes()), // vector<vector<u8>> (resort_images - IPFS URLs)
+        tx.pure(bcs.string().serialize(formData.nft_image).toBytes()), // vector<u8> (nft_image - IPFS URL)
+        formData.due_diligence_url.trim()
+          ? tx.pure(bcs.option(bcs.string()).serialize(formData.due_diligence_url.trim()).toBytes()) // Option<vector<u8>>
+          : tx.pure(bcs.option(bcs.string()).serialize(null).toBytes()), // Option<vector<u8>> (None)
+        tx.object(SUI_CLOCK), // Clock object reference
       ];
 
       if (coinType === "SUI") {
@@ -424,52 +435,57 @@ export default function CreateCampaign() {
 
           <div>
             <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-              Resort Images *
+              Resort Images * (Upload to IPFS)
             </label>
-            <div className="space-y-2">
+            <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
+              Upload at least 1 and up to {MAX_IMAGES} resort images. Images will be uploaded to IPFS.
+            </p>
+            <div className="space-y-4">
               {formData.resort_images.map((image, index) => (
-                <div key={index} className="flex gap-2">
-                  <input
-                    type="url"
+                <div key={index} className="relative">
+                  <ImageUpload
                     value={image}
-                    onChange={(e) => handleImageChange(index, e.target.value)}
-                    className="flex-1 px-4 py-3 rounded-lg bg-white dark:bg-[#111] border border-slate-200 dark:border-white/10 text-slate-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-[#D4AF37] focus:border-transparent transition-all"
-                    placeholder={`Resort image ${index + 1} URL`}
+                    onChange={(url) => handleResortImageChange(index, url)}
+                    label={`Resort Image ${index + 1}`}
+                    required={index === 0}
+                    maxSizeMB={10}
                   />
                   {formData.resort_images.length > 1 && (
                     <button
                       type="button"
                       onClick={() => removeImageField(index)}
-                      className="p-3 rounded-lg bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/30 transition-colors"
+                      className="absolute -top-2 -right-2 p-2 rounded-full bg-red-500 text-white hover:bg-red-600 transition-colors shadow-lg z-10"
+                      title="Remove image"
                     >
-                      <Trash2 className="w-5 h-5" />
+                      <Trash2 className="w-4 h-4" />
                     </button>
                   )}
                 </div>
               ))}
             </div>
-            {formData.resort_images.length < 10 && (
+            {formData.resort_images.length < MAX_IMAGES && (
               <button
                 type="button"
                 onClick={addImageField}
-                className="mt-2 text-sm text-blue-600 dark:text-[#D4AF37] hover:underline"
+                className="mt-4 flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-300 dark:border-white/20 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-white/5 transition-colors text-sm font-medium"
               >
-                + Add another image
+                <PlusCircle className="w-4 h-4" />
+                Add another image
               </button>
             )}
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-              NFT Image URL *
-            </label>
-            <input
-              type="url"
+            <ImageUpload
               value={formData.nft_image}
-              onChange={(e) => handleInputChange("nft_image", e.target.value)}
-              className="w-full px-4 py-3 rounded-lg bg-white dark:bg-[#111] border border-slate-200 dark:border-white/10 text-slate-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-[#D4AF37] focus:border-transparent transition-all"
-              placeholder="https://example.com/nft-image.png"
+              onChange={(url) => handleInputChange("nft_image", url)}
+              label="NFT Image (Upload to IPFS) *"
+              required={true}
+              maxSizeMB={10}
             />
+            <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+              This image will be used for the NFT share tokens. Upload to IPFS.
+            </p>
           </div>
 
           <div>

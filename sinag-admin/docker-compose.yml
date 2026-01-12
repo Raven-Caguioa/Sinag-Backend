@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  sinag-admin:
+    # This specifies the tag for the built image
+    image: c01estrada/sinag-admin:v1.0.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sinag-admin
+    ports:
+      - "3000:3000"
+    restart: always
+    environment:
+      - NODE_ENV=production

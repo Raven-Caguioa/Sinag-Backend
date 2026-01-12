@@ -11,6 +11,14 @@ module sinag::campaign {
     use sui::package;
     use sui::vec_set::{Self, VecSet};
     use std::string::{Self, String};
+    
+    // --- ADDED MISSING IMPORTS TO FIX BUILD ERRORS ---
+    use std::vector;
+    use sui::transfer;
+    use sui::object::{Self, UID, ID};
+    use sui::tx_context::{Self, TxContext};
+    use sui::option::{Self, Option};
+    use sui::clock::{Self, Clock};
 
     // ==================== Error Codes ====================
     
@@ -26,7 +34,6 @@ module sinag::campaign {
     const EInvalidAPY: u64 = 12;
     const EInvalidImageCount: u64 = 13;
 
-    
     // New error codes for yield system
     const ENoActiveRound: u64 = 20;
     const EAlreadyClaimed: u64 = 21;
@@ -271,7 +278,7 @@ module sinag::campaign {
         resort_images: vector<vector<u8>>,
         nft_image: vector<u8>,
         due_diligence_url: Option<vector<u8>>,
-        clock: &sui::clock::Clock,
+        clock: &Clock,
         ctx: &mut TxContext
     ) {
         create_campaign_internal<SUI>(
@@ -308,7 +315,7 @@ module sinag::campaign {
         resort_images: vector<vector<u8>>,
         nft_image: vector<u8>,
         mut due_diligence_url: Option<vector<u8>>,
-        clock: &sui::clock::Clock,
+        clock: &Clock,
         ctx: &mut TxContext
     ) {
         create_campaign_internal<USDC>(
@@ -345,7 +352,7 @@ module sinag::campaign {
         nft_image: vector<u8>,
         mut due_diligence_url: Option<vector<u8>>,
         coin_type_name: String,
-        clock: &sui::clock::Clock,
+        clock: &Clock,
         ctx: &mut TxContext
     ) {
         // Validation
@@ -427,7 +434,7 @@ module sinag::campaign {
         _admin: &AdminCap,
         registry: &mut CampaignRegistry,
         campaign: &mut Campaign<CoinType>,
-        clock: &sui::clock::Clock
+        clock: &Clock
     ) {
         assert!(campaign.status == STATUS_ACTIVE, ECampaignNotActive);
         
@@ -452,7 +459,7 @@ module sinag::campaign {
         _admin: &AdminCap,
         registry: &mut CampaignRegistry,
         campaign: &mut Campaign<CoinType>,
-        clock: &sui::clock::Clock
+        clock: &Clock
     ) {
         assert!(campaign.status != STATUS_ACTIVE, ECampaignStillActive);
         assert!(!campaign.is_finalized, ECampaignAlreadyFinalized);
@@ -470,10 +477,11 @@ module sinag::campaign {
     }
 
     /// Withdraw funds from a finalized campaign
+    /// FIX: Funds are now strictly sent to the Project Treasury Wallet
     entry fun withdraw_funds<CoinType>(
         _admin: &AdminCap,
         campaign: &mut Campaign<CoinType>,
-        clock: &sui::clock::Clock,
+        clock: &Clock,
         ctx: &mut TxContext
     ) {
         assert!(campaign.status != STATUS_ACTIVE, ECampaignStillActive);
@@ -483,16 +491,19 @@ module sinag::campaign {
         assert!(amount > 0, ENoFundsToWithdraw);
 
         let withdrawn = coin::take(&mut campaign.balance, amount, ctx);
-        let recipient = ctx.sender();
+        
+        // --- TREASURY WALLET FIX ---
+        // Funds are sent to this hardcoded address as per requirements
+        let treasury_address = @0x7a3460760da4de7d58d480d676a1cff58376169df66acb6e6b6da6f0baa699ea;
 
         event::emit(FundsWithdrawn {
             campaign_id: object::id(campaign),
             amount,
-            recipient,
+            recipient: treasury_address, // Log the actual recipient
             timestamp: sui::clock::timestamp_ms(clock)
         });
 
-        transfer::public_transfer(withdrawn, recipient);
+        transfer::public_transfer(withdrawn, treasury_address);
     }
 
     // ==================== Yield Distribution Functions ====================
@@ -503,7 +514,7 @@ module sinag::campaign {
         campaign: &mut Campaign<CoinType>,
         yield_per_share: u64,
         yield_deposit: Coin<CoinType>,
-        clock: &sui::clock::Clock,
+        clock: &Clock,
         _ctx: &mut TxContext
     ) {
         // Validate campaign is not active (must be closed/completed)
@@ -554,7 +565,7 @@ module sinag::campaign {
         _admin: &AdminCap,
         campaign: &mut Campaign<CoinType>,
         round_number: u64,
-        clock: &sui::clock::Clock
+        clock: &Clock
     ) {
         assert!(round_number > 0 && round_number <= vector::length(&campaign.yield_rounds), ERoundNotFound);
         
@@ -585,7 +596,7 @@ module sinag::campaign {
     entry fun claim_yield<CoinType>(
         campaign: &mut Campaign<CoinType>,
         nft: &mut ResortShareNFT,
-        clock: &sui::clock::Clock,
+        clock: &Clock,
         ctx: &mut TxContext
     ) {
         // Validate NFT belongs to this campaign
@@ -637,7 +648,7 @@ module sinag::campaign {
         campaign: &mut Campaign<CoinType>,
         nft1: &mut ResortShareNFT,
         nft2: &mut ResortShareNFT,
-        clock: &sui::clock::Clock,
+        clock: &Clock,
         ctx: &mut TxContext
     ) {
         // Validate current round exists
@@ -712,7 +723,7 @@ module sinag::campaign {
         nft1: &mut ResortShareNFT,
         nft2: &mut ResortShareNFT,
         nft3: &mut ResortShareNFT,
-        clock: &sui::clock::Clock,
+        clock: &Clock,
         ctx: &mut TxContext
     ) {
         // Validate current round exists
@@ -806,7 +817,7 @@ module sinag::campaign {
         nft3: &mut ResortShareNFT,
         nft4: &mut ResortShareNFT,
         nft5: &mut ResortShareNFT,
-        clock: &sui::clock::Clock,
+        clock: &Clock,
         ctx: &mut TxContext
     ) {
         // Validate current round exists
@@ -924,7 +935,7 @@ module sinag::campaign {
         campaign: &mut Campaign<CoinType>,
         quantity: u64,
         payment: Coin<CoinType>,
-        clock: &sui::clock::Clock,
+        clock: &Clock,
         ctx: &mut TxContext
     ) {
         // Validation
@@ -977,7 +988,7 @@ module sinag::campaign {
     fun mint_nfts_internal<CoinType>(
         campaign: &mut Campaign<CoinType>,
         quantity: u64,
-        clock: &sui::clock::Clock,
+        clock: &Clock,
         ctx: &mut TxContext
     ): (vector<u64>, u64) {
         let buyer = ctx.sender();
